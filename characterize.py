@@ -17,7 +17,7 @@ import tempfile
 import axle
 
 VALUES = {'i64': ['0', '1', '-1', '2', '7', '100', '1000'], 'u64': ['0u64', '1u64', '2u64', '7u64', '100u64', '1000u64'],
-          'bool': ['false', 'true']}
+          'bool': ['false', 'true'], 'f64': ['0.0', '1.0', '-1.5', '2.5', '100.0']}
 MAX_CASES = 12
 
 
@@ -40,6 +40,8 @@ def cases_for(params):
 def literal(kind, text):
     if kind == 'bool':
         return 'true' if text.strip() in {'true', 'True', '1'} else 'false'
+    if kind == 'f64':
+        return text.strip() if text.strip().replace('.', '', 1).lstrip('-').isdigit() else None
     if kind == 'u64':
         return text.strip() + 'u64'
     return text.strip()
@@ -58,7 +60,7 @@ def run(root, out_dir=None, link_search=(), link_arg=()):
         if entry.get('call') != 'safe' or entry.get('status') != 'bound':
             skipped.append(dict(name=name, reason='needs unsafe or a link step, or is not directly callable'))
             continue
-        if entry['result'] not in {'i64', 'u64', 'bool'}:
+        if entry['result'] not in {'i64', 'u64', 'bool', 'f64'}:
             skipped.append(dict(name=name, reason=f'result type {entry["result"]} cannot be recorded'))
             continue
         cases = cases_for(entry['params'])
@@ -104,7 +106,10 @@ def run(root, out_dir=None, link_search=(), link_arg=()):
             value = observed.get((entry['name'], case))
             if value is None:
                 continue
-            asserts.append(f'    assert({entry["name"]}({", ".join(case)}) == {literal(entry["result"], value)});')
+            expected = literal(entry['result'], value)
+            if expected is None:
+                continue     # NaN and infinities have no literal
+            asserts.append(f'    assert({entry["name"]}({", ".join(case)}) == {expected});')
         if not asserts:
             continue
         recorded += len(asserts)

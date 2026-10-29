@@ -35,7 +35,12 @@ for line in sys.stdin:
         function = getattr(mod, parts[0], None)
         if not callable(function):
             raise AttributeError("no callable named %s in %s" % (parts[0], target))
-        args = [True if a == "true" else False if a == "false" else int(a) for a in parts[1:]]
+        def convert(a):
+            if a == "true": return True
+            if a == "false": return False
+            try: return int(a)
+            except ValueError: return float(a)
+        args = [convert(a) for a in parts[1:]]
         result = function(*args)
         if result is None:
             reply("ok unit")
@@ -43,8 +48,10 @@ for line in sys.stdin:
             reply("ok " + ("true" if result else "false"))
         elif isinstance(result, int):
             reply("ok %d" % result)
+        elif isinstance(result, float):
+            reply("ok " + repr(result))
         else:
-            reply("err unsupported return type %s (bridges carry i64, u64, bool and unit)" % type(result).__name__)
+            reply("err unsupported return type %s (bridges carry i64, u64, f64, bool and unit)" % type(result).__name__)
     except BaseException as error:
         reply("err %s: %s" % (type(error).__name__, str(error).replace("\n", " ")))
 '''
@@ -66,6 +73,7 @@ const ready = (async () => {
 function parse(a) {
   if (a === "true") return true;
   if (a === "false") return false;
+  if (/[.eEnNiI]/.test(a) && !/^-?\d+$/.test(a)) return Number(a);
   const v = BigInt(a);
   return (v >= -9007199254740991n && v <= 9007199254740991n) ? Number(v) : v;
 }
@@ -80,8 +88,8 @@ async function handle(line) {
     const result = await fn(...parts.slice(1).map(parse));
     if (result === undefined || result === null) reply("ok unit");
     else if (typeof result === "boolean" || typeof result === "bigint") reply("ok " + result);
-    else if (typeof result === "number" && Number.isSafeInteger(result)) reply("ok " + result);
-    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, bool and unit)");
+    else if (typeof result === "number") reply("ok " + result);
+    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, f64, bool and unit)");
   } catch (error) { reply("err " + String((error && error.message) || error).replace(/\n/g, " ")); }
 }
 let chain = Promise.resolve();

@@ -30,4 +30,4 @@ AXLE is small on purpose: explicit types, explicit effects, one obvious way to w
 
 ## Foreign code
 
-Bridges and C calls carry `i64`, `u64`, `bool` and `unit` only (plus C integer widths and scalar pointers for C). Functions using floats, strings or structs cannot be called yet. Wrap them in a small function that takes and returns integers.
+Bridges and C calls carry `i64`, `u64`, `f64`, `bool` and `unit` (plus C integer widths and scalar pointers for C). Python `float` and C `double` are adopted as `f64`. Functions using strings or structs cannot be called yet. Wrap them in a small function that takes and returns integers.

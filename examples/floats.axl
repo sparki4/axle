@@ -1,0 +1,8 @@
+// f64 follows IEEE 754: division by zero gives inf, never an abort. Conversions are explicit.
+fn hyp(a: f64, b: f64) -> f64 { return f64_sqrt(a * a + b * b); }
+
+fn main() -> unit ![io] {
+    print(hyp(3.0, 4.0));
+    print(f64_to_i64(f64_from_i64(7) / 2.0));
+    print(1.0 / 0.0);
+}

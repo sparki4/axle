@@ -16,7 +16,17 @@ import bridge_runtime
 
 VERSION = '0.4.0'
 EDITION = '0.4'
-TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64'}
+TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64', 'f64'}
+NUMERIC = {'i64', 'u64', 'f64'}
+# name: (parameter types, result, Rust template). f64 never aborts: IEEE 754 gives inf/NaN instead.
+F64_FUNCS = {
+    'f64_from_i64': (['i64'], 'f64', '(({0}) as f64)'), 'f64_from_u64': (['u64'], 'f64', '(({0}) as f64)'),
+    'f64_to_i64': (['f64'], 'i64', '(({0}) as i64)'), 'f64_to_u64': (['f64'], 'u64', '(({0}) as u64)'),
+    'f64_is_nan': (['f64'], 'bool', '({0}).is_nan()'), 'f64_pow': (['f64', 'f64'], 'f64', '({0}).powf({1})'),
+    'f64_to_bits': (['f64'], 'u64', '({0}).to_bits()'), 'f64_from_bits': (['u64'], 'f64', 'f64::from_bits({0})'),
+}
+for _n in ('sqrt', 'abs', 'floor', 'ceil', 'round', 'sin', 'cos', 'tan', 'exp', 'ln'):
+    F64_FUNCS['f64_' + _n] = (['f64'], 'f64', '({0}).' + _n + '()')
 
 # Stable diagnostic codes and generic repair hints, matched against the message.
 DIAGNOSTICS = [
@@ -107,7 +117,7 @@ class Token:
     bad: bool = False
 
 def lex(source, source_name=None):
-    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
+    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
     tokens, pos, line, column = [], 0, 1, 1
     while pos < len(source):
         match = pattern.match(source, pos)
@@ -137,7 +147,7 @@ RESERVED = TYPES | set(ABI_TYPES) | {'import', 'fn', 'let', 'var', 'return', 'if
                                      'nothrow', 'noalloc', 'edition'}
 BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'offset',
             'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec',
-            'abort', 'unimplemented'}
+            'abort', 'unimplemented'} | set(F64_FUNCS)
 
 class Parser:
     def __init__(self, source, source_name=None):
@@ -326,7 +336,7 @@ class Parser:
         elif token.value == '(':
             left = self.expr()
             self.need(')')
-        elif re.fullmatch(r'[0-9]+(?:u64|i64)?', token.value):
+        elif re.fullmatch(r'[0-9]+(?:u64|i64)?|' + FLOAT, token.value):
             left = ('number', token)
         elif token.value in {'true', 'false'}:
             left = ('bool', token)
@@ -347,6 +357,8 @@ class Parser:
             op = self.pop()
             left = ('binary', op, left, self.expr(self.PRECEDENCE[op.value] + 1))
         return left
+
+FLOAT = r'[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64'
 
 def rust_type(typ):
     return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else typ
@@ -439,6 +451,10 @@ class Compiler:
     def expression(self, node):
         kind, token, *rest = node
         value = token.value
+        if kind == 'number' and re.fullmatch(FLOAT, value):
+            text = value.removesuffix('f64')
+            if float(text) == float('inf'): raise Error('float literal out of range', token)
+            return 'f64', text + 'f64'
         if kind == 'number':
             match = re.fullmatch(r'([0-9]+)(u64|i64)?', value)
             if len(match[1]) > 20: raise Error('integer literal out of range', token)
@@ -461,7 +477,8 @@ class Compiler:
             if value == '~':
                 if typ not in {'i64', 'u64'}: raise Error('bitwise not requires integer', token)
                 return typ, f'(!({code}))'
-            if typ not in {'i64', 'u64'}: raise Error('negation requires integer', token)
+            if typ == 'f64': return typ, f'(-({code}))'
+            if typ not in {'i64', 'u64'}: raise Error('negation requires a number', token)
             return typ, f'({code}).wrapping_neg()'
         if kind == 'binary':
             lt, lc = self.expression(rest[0])
@@ -471,8 +488,12 @@ class Compiler:
                 self.require(lt, 'bool', token)
             elif value in {'==', '!='}:
                 if lt in {'unit', 'buf_u64'}: raise Error(lt + ' cannot be compared', token)
-            elif lt not in {'i64', 'u64'}:
+            elif lt == 'f64' and value in {'&', '|', '^', '<<', '>>'}:
+                raise Error(f'operator {value} is not defined for f64', token, hint='bit operations need integers; use f64_to_bits to inspect the bits')
+            elif lt not in NUMERIC:
                 raise Error('operator requires integer operands', token)
+            if lt == 'f64':
+                return ('bool' if value in {'==', '!=', '<', '>', '<=', '>='} else 'f64'), f'(({lc}) {value} ({rc}))'
             methods = {'+': 'wrapping_add', '-': 'wrapping_sub', '*': 'wrapping_mul',
                        '/': 'wrapping_div', '%': 'wrapping_rem', '<<': 'wrapping_shl', '>>': 'wrapping_shr'}
             if value in methods:
@@ -508,6 +529,10 @@ class Compiler:
                 self.note('foreign', token, abi='polyglot', symbol=f'block {index}', effect='io')
                 self.note('abort', token, why='a failing guest block aborts the program', via='poly_exec')
                 return 'unit', self.foreign_commands[index]
+            if value in F64_FUNCS:
+                want, result, template = F64_FUNCS[value]
+                if types != want: raise Error(f'{value} requires ({", ".join(want)}), got ({", ".join(types)})', token)
+                return result, template.format(*codes)
             if value == 'black_box':
                 if len(types) != 1 or types[0] == 'unit': raise Error('black_box requires one value', token)
                 return types[0], 'std::hint::black_box(' + codes[0] + ')'
@@ -557,10 +582,10 @@ class Compiler:
                 return 'unit', f'{{ let axle_pointer = {codes[0]}; let axle_value = {codes[1]}; unsafe {{ *axle_pointer = axle_value; }} }}'
             if value == 'print':
                 self.effect('io', token)
-                if len(types) != 1 or types[0] not in {'i64', 'u64', 'bool'}: raise Error('print requires one scalar', token)
+                if len(types) != 1 or types[0] not in {'i64', 'u64', 'bool', 'f64'}: raise Error('print requires one scalar', token)
                 self.note('io', token, what='prints to standard output', effect='io')
                 self.note('abort', token, why='standard output can fail (for example a closed pipe)', via='print', effect='io')
-                return 'unit', 'println!("{}", ' + codes[0] + ')'
+                return 'unit', 'println!("' + ('{:?}' if types[0] == 'f64' else '{}') + '", ' + codes[0] + ')'
             if value in {'abort', 'unimplemented'}:
                 if types: raise Error(f'{value} takes no arguments', token)
                 self.note('abort', token, why='explicit abort' if value == 'abort' else 'unimplemented code is reached', via=value)
@@ -690,7 +715,7 @@ class Compiler:
         else:
             target = spec
         root_dir = str((base / root).resolve()) if root else (str(pathlib.Path(target).parent) if spec.endswith(suffixes) else str(base))
-        values = ', '.join(f'v_{p.value}.to_string()' for p, _ in params)
+        values = ', '.join(f'format!("{{:?}}", v_{p.value})' if t == 'f64' else f'v_{p.value}.to_string()' for p, t in params)
         call = f'axle_bridge_call({rust_literal(lang)}, {rust_literal(target)}, {rust_literal(root_dir)}, {rust_literal(symbol)}, &[{values}])'
         if result == 'unit': tail = f'let _ = {call};'
         elif result == 'bool':

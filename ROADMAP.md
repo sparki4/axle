@@ -49,14 +49,14 @@ Discuss each extension before implementing it:
 
 - Records with specified layouts and predictable field access.
 - Checked slices and generic containers with explicit ownership rules.
-- Numeric conversions, additional scalar widths, floats, and useful string types.
+- Additional scalar widths (`f32`, narrower integers) and useful string types. `f64` is done.
 - Module namespaces and build/project integration.
 
 Syntax should stay easy to generate, review, and diagnose. Language growth should preserve defined integer behavior and visible resource/effect contracts.
 
 ## Interoperability and speed
 
-- Extend the foreign-function interface beyond integers, booleans and scalar pointers: floats, strings and layout-specified records, with clear lifetime rules.
+- Extend the foreign-function interface beyond integers, booleans and scalar pointers: strings and layout-specified records, with clear lifetime rules.
 - Make bridge executables relocatable and add TypeScript/type-stub inputs to `adopt` (Go, Java and .NET scanners are open).
 - Investigate persistent or embedded Python/JavaScript runtimes for workloads that cannot afford a process per call.
 - Define explicit data-exchange contracts rather than pretending unrelated runtimes share memory automatically.

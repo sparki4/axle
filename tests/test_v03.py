@@ -163,7 +163,7 @@ fn main() -> unit ![io] { print(mean2(10, 20)); print(is_even(7)); print(f(4)); 
     def test_python_errors_and_bad_types_abort_clearly(self):
         with tempfile.TemporaryDirectory() as d:
             self.project(d)
-            for call, text in [('boom(0)', 'ZeroDivisionError'), ('ratio(3)', 'unsupported return type float')]:
+            for call, text in [('boom(0)', 'ZeroDivisionError'), ('ratio(3)', 'expected a i64 result, got')]:
                 result = run_source(d, f'''
 extern "py:legacy/stats.py" fn boom(n: i64) -> i64;
 extern "py:legacy/stats.py" fn ratio(n: i64) -> i64;
@@ -236,7 +236,7 @@ class AdoptTests(unittest.TestCase):
             self.assertNotIn('hidden', names)
             reasons = {(s['name'], s['reason']) for s in report['skipped']}
             skipped_names = {n for n, _ in reasons}
-            self.assertTrue({'no_hint', 'ratio', 'loose', 'half', 'main'} <= skipped_names, skipped_names)
+            self.assertTrue({'no_hint', 'loose', 'main'} <= skipped_names and not {'ratio', 'half'} & skipped_names, skipped_names)
             renamed = [e for e in report['bindings'] if e['foreign_name'] == 'print']
             self.assertEqual(renamed[0]['name'], 'py_print')
             statuses = {e['foreign_name']: e['status'] for e in report['bindings']}

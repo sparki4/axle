@@ -92,6 +92,7 @@ print("parent finished")
             finally:
                 poly.GUESTS.pop('custom_python', None)
                 poly.HOSTS.pop('custom_host', None)
+    @unittest.skipUnless(__import__('shutil').which('pwsh'), 'needs PowerShell (pwsh)')
     def test_powershell_guest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

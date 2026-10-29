@@ -9,6 +9,8 @@ This is a direction for contributors, not a release schedule or a promise that e
 - Local type inference and relative source imports.
 - Optimized native builds through Rust, with release/native/size profiles.
 - AXLE, Python, JavaScript, Rust, C, and C++ as mixed-language hosts and guests, including nested blocks.
+- Typed `extern` calls into C (direct), Python and JavaScript (persistent workers), `native`/`link` inputs, and `axle adopt` binding generation with a skipped-function report.
+- Structured diagnostics with stable codes, hints and name suggestions; `axle api` for tooling.
 - An adapter API, runnable examples, regression tests, and matched-profile benchmarks.
 
 These features still have the limits described in the references. Mixed blocks launch subprocesses and do not share local variables or types.
@@ -46,7 +48,8 @@ Syntax should stay easy to generate, review, and diagnose. Language growth shoul
 
 ## Interoperability and speed
 
-- Specify a typed foreign-function interface, starting with a narrow C ABI and clear lifetime rules.
+- Extend the foreign-function interface beyond integers, booleans and scalar pointers: floats, strings and layout-specified records, with clear lifetime rules.
+- Make bridge executables relocatable and add TypeScript/type-stub inputs to `adopt` (Go, Java and .NET scanners are open).
 - Investigate persistent or embedded Python/JavaScript runtimes for workloads that cannot afford a process per call.
 - Define explicit data-exchange contracts rather than pretending unrelated runtimes share memory automatically.
 - Add application-level workloads and statistical summaries to the benchmark suite.

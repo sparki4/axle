@@ -1,0 +1,11 @@
+// Run:  python axle.py adopt examples/adopt -o examples/adopt/.axle
+//       python axle.py run examples/adopt/main.axl
+// One program, three existing languages, no changes to any of them.
+import ".axle/bindings.axl";
+
+fn main() -> unit ![io] {
+    print(with_tax(1000, 17));    // Python
+    print(is_free(0));            // Python
+    print(is_prime(97));          // JavaScript
+    print(sum_squares(1000u64));  // C, compiled and linked directly
+}

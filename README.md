@@ -1,9 +1,9 @@
-# AXLE 0.2
+# AXLE 0.3
 
 [![Tests](https://github.com/sparki4/axle/actions/workflows/tests.yml/badge.svg)](https://github.com/sparki4/axle/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A native language for coding agents, plus an extensible polyglot source builder. AXLE provides exact scalar types, checked effects, explicit raw memory, and higher level checked buffers. The polyglot builder lets different host languages contain blocks written in other languages.
+A native language for coding agents that adopts existing code instead of replacing it. AXLE can call functions in your current Python, JavaScript, C and Rust-ABI code through typed declarations, scan a codebase to generate those declarations, and report errors as structured diagnostics with codes and fix hints. It also includes an extensible polyglot source builder. AXLE provides exact scalar types, checked effects, explicit raw memory, and higher level checked buffers. The polyglot builder lets different host languages contain blocks written in other languages.
 
 This is an experimental working implementation, not a replacement for Rust on every project. The core compiles through Rust. The polyglot bridge uses separate processes and installed runtimes; it is not a unified shared-memory runtime.
 
@@ -54,11 +54,46 @@ fn main() -> unit ![mem, io] {
 }
 ```
 
-`let` fixes the binding; `var` permits reassignment. Local type annotations are optional, with exact types inferred from initializers. Parameters, returns, and effects remain explicit. No implicit numeric conversion is performed. Unsuffixed integers are `i64`; use `u64` for unsigned values. Arithmetic wraps with defined 64-bit semantics.
+`let` fixes the binding; `var` permits reassignment. Control flow has `if`/`else if`/`else`, `while`, `break` and `continue`; `~` is bitwise not. Local type annotations are optional, with exact types inferred from initializers. Parameters, returns, and effects remain explicit. No implicit numeric conversion is performed. Unsuffixed integers are `i64`; use `u64` for unsigned values. Arithmetic wraps with defined 64-bit semantics.
 
 Safe `buf_u64` values are shared handles to checked storage. Assigning or passing one clones the handle and shares the same contents. The last handle automatically releases storage. A `let` buffer can still have its contents changed with `buf_set`; the binding cannot be reassigned. This uses Rust `Rc<RefCell<Vec<u64>>>` internally and carries reference-count/borrow-check overhead. It is single-threaded. Raw pointers have no bounds, lifetime, or ownership tracking and can cause undefined behavior when misused.
 
 `import "lib/math.axl";` loads relative source files once, rejects import cycles, and makes their functions available in one global namespace. Forward calls and recursion work. Modules do not provide namespaces, separate compilation, or a package system yet.
+
+## Adopt an existing codebase
+
+You do not rewrite your project in AXLE. Point `adopt` at it and import what it finds:
+
+```sh
+python axle.py adopt path/to/project        # writes .axle/bindings.axl and .axle/axle.map.json
+```
+
+```text
+import ".axle/bindings.axl";
+
+fn main() -> unit ![io] {
+    print(with_tax(1000, 17));   // an existing Python function
+    print(is_prime(97));         // an existing JavaScript function
+    print(sum_squares(1000u64)); // an existing C function, compiled and linked in
+}
+```
+
+`adopt` reads Python (type annotations), JavaScript (JSDoc types), C and Rust `extern "C"` functions. It binds only functions whose signatures AXLE can represent exactly, and `axle.map.json` records every function it skipped with the reason (for example "parameter `x` needs an `int` annotation"), so an agent knows what to annotate. Nothing in your project is modified. See `examples/adopt/`.
+
+The generated file uses three declarations that you can also write by hand:
+
+```text
+native "fast.c";                                   // compile and link this C file
+link "m";                                          // link a library (-L with --link-search)
+extern "c" fn labs(x: c_long) -> c_long;           // C ABI, called inside unsafe
+extern "py:legacy/pricing.py" fn with_tax(c: i64, p: i64) -> i64;   // Python function
+extern "js:legacy/checks.js" fn is_prime(n: i64) -> bool;           // JavaScript function
+extern "py:pkg.module@src" fn run(n: i64) -> i64;                   // importable module under root `src`
+```
+
+C calls are direct native calls, at full speed. `c_int`, `c_uint`, `c_long`, `c_ulong` and `c_size` are C ABI widths valid only in `extern "c"` signatures: AXLE values stay 64-bit and arguments are range-checked on the way in. Python and JavaScript calls go to one persistent worker per module, not a new process per call. The foreign module is imported as it is, so its own imports keep working, its prints reach your terminal, and exceptions abort with the original message. Bridges carry `i64`, `u64`, `bool` and `unit`; JavaScript promises are awaited and 64-bit values stay exact. Floats, strings and structs are not supported yet.
+
+`python axle.py api program.axl` prints a JSON description of every function, signature, effect and extern. See [AGENTS.md](AGENTS.md) for a short guide aimed at coding agents.
 
 ## Mix host and guest languages
 
@@ -109,20 +144,22 @@ python benchmark_suite.py --samples 9 --output benchmark-v02.json
 
 ```powershell
 python axle.py check examples/adaptive.axl --json
+python axle.py api examples/adaptive.axl
+python axle.py adopt path/to/project
 python axle.py emit examples/adaptive.axl -o adaptive.rs
 python axle.py build examples/adaptive.axl --profile size -o adaptive.exe
 python axle.py run examples/hash.axl --args 1000
 python polyglot.py list
 ```
 
-`check` checks the core language without Rust. `emit` exposes generated Rust for review. `build` writes a native executable. `run` uses temporary outputs. `--args` must come last. Core diagnostics stop at the first error and report line/column; imported language errors also include their source path. `--json` emits structured language diagnostics on stderr. Successful check/build status is emitted on stdout; emit status goes to stderr if Rust occupies stdout. Native program output, guest failures, and backend diagnostics are not converted to JSON. There is no AXLE source map for backend errors.
+`check` checks the core language without Rust. `emit` exposes generated Rust for review. `build` writes a native executable. `run` uses temporary outputs. `--args` must come last. Core diagnostics stop at the first error and report line/column; imported language errors also include their source path. `--json` emits structured language diagnostics on stderr, including a stable `code` (such as `E011`), a `hint`, and a `suggestion` when a close name exists. Successful check/build status is emitted on stdout; emit status goes to stderr if Rust occupies stdout. Native program output, guest failures, and backend diagnostics are not converted to JSON. There is no AXLE source map for backend errors.
 
 The core tests include 510 reproducible arithmetic comparisons with Python, rejection cases, native examples, pointer operations, buffer aliasing and bounds failures, imports, and all build profiles. Polyglot tests cover the six-by-six language matrix. Passing tests cannot prove zero bugs.
 
 ## Current boundary
 
-AXLE still lacks user-defined structs, generics, floats, runtime strings, concurrency, a package manager, a language server, and direct FFI. The native frontend is Python and the native backend is Rust. Guest-language features are provided by their own runtimes rather than becoming AXLE types. Existing multi-file projects and special build systems need build integration; the built-in polyglot tool operates on one mixed host source and generated guest units.
+AXLE still lacks user-defined structs, generics, floats, runtime strings, concurrency, a package manager, and a language server. Direct FFI covers the C ABI with integer, boolean and pointer arguments only. The native frontend is Python and the native backend is Rust. Guest-language features are provided by their own runtimes rather than becoming AXLE types. Existing multi-file projects and special build systems need build integration; the built-in polyglot tool operates on one mixed host source and generated guest units.
 
-The next substantial improvements would be typed direct FFI, records with specified layouts, generic containers, persistent embedded runtimes, and broader application-level benchmarks. They are not implemented features.
+The next substantial improvements would be floats and strings across the FFI boundary, records with specified layouts, generic containers, persistent embedded runtimes, and broader application-level benchmarks. They are not implemented features.
 
 See [SPEC.md](SPEC.md) for the language reference and [POLYGLOT.md](POLYGLOT.md) for mixed-language builds. License: MIT.

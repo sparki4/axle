@@ -1,11 +1,14 @@
-# AXLE 0.2 language reference
+# AXLE 0.3 language reference
 
 This describes the implemented core. Source is UTF-8; identifiers use ASCII letters, digits, and `_`, and cannot start with a digit. Whitespace separates tokens. `//` comments extend to the end of the line. Keywords and type names cannot be identifiers. Builtin names cannot be declared as functions. Identifiers are case-sensitive. Quoted paths are supported only in imports; there are no runtime strings, character literals, preprocessor directives, or implicit semicolons. Mixed-language source is handled by the separate polyglot builder described in POLYGLOT.md.
 
 ## Grammar
 
 ```ebnf
-program    = { function | "import", quoted_relative_axl_path, ";" } ;
+program    = { function | extern | "import", quoted_relative_axl_path, ";"
+             | "link", quoted_library_name, ";" | "native", quoted_relative_path, ";" } ;
+extern     = "extern", quoted_kind, "fn", identifier, "(", [params], ")", "->", type,
+             ["!", "[", [effect, {",", effect}], "]"], ["=", quoted_foreign_name], ";" ;
 function   = "fn", identifier, "(", [params], ")", "->", type,
              ["!", "[", [effect, {",", effect}], "]"], block ;
 params     = identifier, ":", type, {",", identifier, ":", type} ;
@@ -17,16 +20,17 @@ statement  = ("let" | "var"), identifier, [":", type], "=", expression, ";"
            | "return", [expression], ";"
            | "if", expression, block, ["else", block]
            | "while", expression, block
+           | "break", ";" | "continue", ";"
            | "unsafe", block
            | expression, ";" ;
 expression = integer | "true" | "false" | identifier
            | identifier, "(", [expression, {",", expression}], ")"
            | "(", expression, ")"
-           | ("!" | "-"), expression
+           | ("!" | "-" | "~"), expression
            | expression, binary_operator, expression ;
 ```
 
-Pointer type `*` and its scalar name may have whitespace between them. Trailing commas and `else if` are not accepted; use a nested `if` in an `else` block. Integers are decimal, optionally suffixed `i64` or `u64`. Literal values must fit their type. The special negative literal `-9223372036854775808` (optionally suffixed `i64`) denotes the signed minimum, including with parentheses around its positive magnitude.
+Pointer type `*` and its scalar name may have whitespace between them. Trailing commas are not accepted. `else if` is accepted and is sugar for an `else` block holding one `if`. Integers are decimal, optionally suffixed `i64` or `u64`. Literal values must fit their type. The special negative literal `-9223372036854775808` (optionally suffixed `i64`) denotes the signed minimum, including with parentheses around its positive magnitude.
 
 ## Types and bindings
 
@@ -58,7 +62,7 @@ All binary operators associate left. Precedence, highest first:
 | Logical AND | `&&` |
 | Logical OR | `\|\|` |
 
-Operands must have identical types. Arithmetic, shifts, bitwise operations, and ordered comparisons require integers. Logical operations and `!` require booleans. Equality accepts integers, booleans, and same-type pointers, but not `unit`. Unary minus wraps on both integer types. Bitwise NOT is not implemented.
+Operands must have identical types. Arithmetic, shifts, bitwise operations, and ordered comparisons require integers. Logical operations and `!` require booleans. Equality accepts integers, booleans, and same-type pointers, but not `unit`. Unary minus wraps on both integer types. `~` is bitwise not on integers.
 
 `+`, `-`, `*`, and unary minus wrap modulo 2^64. Signed results use two's-complement interpretation. `/` truncates toward zero; `%` has the dividend's sign. Signed minimum divided by `-1` wraps to signed minimum; its remainder is zero. Division or remainder by zero aborts the program with a runtime diagnostic. Both behaviors are identical in optimized and unoptimized generated Rust.
 
@@ -68,7 +72,7 @@ Expressions evaluate left-to-right, including function arguments and the pointer
 
 ## Control flow and effects
 
-`return;` returns `unit`. `return expression;` requires the declared result type. A non-unit function must return on all paths recognized by the checker: an explicit return, an `unsafe` block that returns, or an `if` with returning branches on both sides. Loops are conservatively considered fallthrough paths, even `while true`. Statements following a proven unconditional return are rejected. There is no `break` or `continue` yet.
+`return;` returns `unit`. `return expression;` requires the declared result type. A non-unit function must return on all paths recognized by the checker: an explicit return, an `unsafe` block that returns, or an `if` with returning branches on both sides. Loops are conservatively considered fallthrough paths, even `while true`. Statements following a proven unconditional return are rejected. `break` and `continue` apply to the innermost `while` and are rejected outside loops. They end the current path for unreachable-code checks but do not count as returns.
 
 Each function's declared effect set must contain the effect set of every called user function and every called builtin. This enforces propagation through recursive and forward calls because all signatures are known before body checking. Unused declared effects are allowed. There is no inference of a narrower effect set from a callee's body. All syntactic branches are checked, even unreachable constant branches. `unsafe` does not add any effect by itself.
 
@@ -105,6 +109,20 @@ Each function's declared effect set must contain the effect set of every called 
 `alloc_u64` allocates a positive count of zero-initialized `u64` values using the system-backed Rust allocator. Count zero, counts that cannot fit the target size/layout, or allocation failure abort. `free_u64` requires exactly the original pointer and original count for one live allocation made by `alloc_u64`. After release, all its pointers are invalid. Stack addresses must never be passed to `free_u64`. Every raw allocated buffer needs exactly one release; raw storage has no automatic cleanup.
 
 Unsafe code is responsible for memory validity, pointer provenance, alignment, valid boolean representations, no invalid alias use, and no use after free/return. The compiler does not verify these properties. Escaping a local pointer from a function is accepted and can lead to undefined behavior if subsequently used after the local's lifetime ends.
+
+## Foreign declarations
+
+`extern "<kind>" fn name(params) -> type [![effects]] [= "foreign_name"];` declares a function implemented elsewhere. The optional `= "foreign_name"` binds a different symbol or function name than the AXLE name. Extern names share the function namespace and cannot repeat or shadow builtins.
+
+**Kind `"c"`** is a direct call through the platform C ABI. Calls require an `unsafe` block, because AXLE cannot verify the foreign code, and the declared effect list is a claim that AXLE trusts. Parameter and result types may be `i64`, `u64`, `bool`, `unit` (result only), scalar pointers, and the ABI widths `c_int`, `c_uint`, `c_long`, `c_ulong` and `c_size`. ABI widths are legal only in `extern "c"` signatures. AXLE sees them as `i64` (`c_int`, `c_long`) or `u64` (`c_uint`, `c_ulong`, `c_size`). Arguments are converted with a range check that aborts on overflow; results are widened exactly. `buf_u64` cannot cross the boundary. Symbols come from `native` objects, `link` libraries, or the platform C library.
+
+**Kinds `"py:<target>[@root]"` and `"js:<target>[@root]"`** call a function in a persistent worker process. A target ending in `.py` (or `.js`, `.mjs`, `.cjs`) is a file path relative to the declaring source file; any other target is a module name resolved from `root` (default: the declaring file's directory). Only `i64`, `u64`, `bool` parameters and `i64`, `u64`, `bool`, `unit` results are allowed. Bridge calls implicitly carry `io` and need no `unsafe`. Arguments are sent as decimal text. A result that is not exactly the declared type (a float, a negative value for `u64`, a value outside 64 bits) aborts with the foreign message. Foreign exceptions abort with their original text. The worker loads the module once; state persists between calls and ends with the program. File targets are resolved to absolute paths when compiled, so a built executable is not relocatable. Set `AXLE_PYTHON` or `AXLE_NODE` to choose an interpreter. The JavaScript worker supports CommonJS and `.mjs`.
+
+`native "path";` compiles a `.c`, `.cc`, `.cpp` or `.cxx` file with the system compiler (gcc, clang or cc; `cl` is attempted on Windows but unverified) and links it. A `.o` or `.a` is linked as is. C++ must export `extern "C"` symbols. The path is relative to the declaring file. `link "name";` adds `-l name`; use `--link-search DIR` for directories and `--link-arg ARG` for other linker flags. Both apply to `build` and `run`.
+
+## Diagnostics
+
+Each diagnostic has a message, line, column, and optionally a source path. `--json` adds a stable `code` (`E0xx`), a `hint` describing the repair, and a `suggestion` when a similarly named variable or function exists. Codes identify the category and stay stable; message wording may change.
 
 ## Implementation boundary
 

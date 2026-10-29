@@ -128,6 +128,14 @@ class Error(Exception):
         self.source = token.source if token else None
         super().__init__(message)
 
+class Errors(Error):
+    """Several independent errors found in one pass; the first one is the primary."""
+    def __init__(self, errors):
+        self.errors = list(errors)
+        first = self.errors[0]
+        super().__init__(first.message)
+        self.hint, self.suggestion, self.line, self.column, self.source, self.code = first.hint, first.suggestion, first.line, first.column, first.source, first.code
+
 @dataclass
 class Token:
     value: str
@@ -246,6 +254,61 @@ class Parser:
         if not token.value.startswith('"') or '\\' in token.value:
             raise Error(f'expected a quoted {what} without escapes', token)
         return token, token.value[1:-1]
+    def recover(self):
+        """Skip to the next top-level declaration (a line that starts in column 1) so later errors can still be reported."""
+        if self.i < len(self.tokens) - 1: self.i += 1
+        while self.tokens[self.i].value != '<eof>' and not (self.tokens[self.i].column == 1 and self.tokens[self.i].value in
+                                                           {'fn', 'struct', 'extern', 'import', 'link', 'native', 'edition'}):
+            self.i += 1
+    def item(self, functions):
+        if self.take('import'):
+            path = self.pop()
+            if not path.value.startswith('"') or '\\' in path.value or not path.value.endswith('.axl"'):
+                raise Error('import requires a quoted .axl path using forward slashes', path)
+            self.need(';')
+            self.imports.append(path)
+            return
+        if self.peek() == 'struct':
+            self.pop()
+            name = self.name()
+            self.need('{')
+            fields = []
+            while self.peek() != '}':
+                field = self.name()
+                self.need(':')
+                fields.append((field, self.type()))
+                if not self.take(','): break
+            self.need('}')
+            if not fields: raise Error('a struct needs at least one field', name)
+            self.structs.append((name, fields))
+            return
+        if self.take('link'):
+            token, library = self.quoted('library name')
+            if not re.fullmatch(r'[A-Za-z0-9_.+-]+', library):
+                raise Error('link requires a plain library name such as "m"; use --link-search for directories', token)
+            self.need(';')
+            self.links.append(library)
+            return
+        if self.take('native'):
+            token, path = self.quoted('source path')
+            if not path.endswith(('.c', '.cc', '.cpp', '.cxx', '.o', '.a')) or path.startswith('/') or ':' in path:
+                raise Error('native requires a relative .c/.cc/.cpp/.cxx/.o/.a path with forward slashes', token)
+            self.need(';')
+            self.natives.append((token, path))
+            return
+        if self.take('extern'):
+            self.externs.append(self.extern())
+            return
+        start = self.tokens[self.i]
+        if self.peek() in FOREIGN_KEYWORDS:
+            raise Error(f'AXLE has no `{self.peek()}`', start, hint=FOREIGN_KEYWORDS[self.peek()])
+        self.need('fn')
+        name, params, result, effects = self.header()
+        if self.last_guarantees: self.guarantees[name.value] = self.last_guarantees
+        body = self.block()
+        self.spans[name.value] = (name.source, start.line, self.tokens[self.i - 1].line)
+        functions.append((name, params, result, effects, body))
+
     def program(self):
         functions = []
         self.edition = self.edition_token = None
@@ -253,54 +316,15 @@ class Parser:
             self.edition_token = self.pop()
             _, self.edition = self.quoted('edition')
             self.need(';')
+        self.errors = []
         while self.peek() != '<eof>':
-            if self.take('import'):
-                path = self.pop()
-                if not path.value.startswith('"') or '\\' in path.value or not path.value.endswith('.axl"'):
-                    raise Error('import requires a quoted .axl path using forward slashes', path)
-                self.need(';')
-                self.imports.append(path)
-                continue
-            if self.peek() == 'struct':
-                self.pop()
-                name = self.name()
-                self.need('{')
-                fields = []
-                while self.peek() != '}':
-                    field = self.name()
-                    self.need(':')
-                    fields.append((field, self.type()))
-                    if not self.take(','): break
-                self.need('}')
-                if not fields: raise Error('a struct needs at least one field', name)
-                self.structs.append((name, fields))
-                continue
-            if self.take('link'):
-                token, library = self.quoted('library name')
-                if not re.fullmatch(r'[A-Za-z0-9_.+-]+', library):
-                    raise Error('link requires a plain library name such as "m"; use --link-search for directories', token)
-                self.need(';')
-                self.links.append(library)
-                continue
-            if self.take('native'):
-                token, path = self.quoted('source path')
-                if not path.endswith(('.c', '.cc', '.cpp', '.cxx', '.o', '.a')) or path.startswith('/') or ':' in path:
-                    raise Error('native requires a relative .c/.cc/.cpp/.cxx/.o/.a path with forward slashes', token)
-                self.need(';')
-                self.natives.append((token, path))
-                continue
-            if self.take('extern'):
-                self.externs.append(self.extern())
-                continue
-            start = self.tokens[self.i]
-            if self.peek() in FOREIGN_KEYWORDS:
-                raise Error(f'AXLE has no `{self.peek()}`', start, hint=FOREIGN_KEYWORDS[self.peek()])
-            self.need('fn')
-            name, params, result, effects = self.header()
-            if self.last_guarantees: self.guarantees[name.value] = self.last_guarantees
-            body = self.block()
-            self.spans[name.value] = (name.source, start.line, self.tokens[self.i - 1].line)
-            functions.append((name, params, result, effects, body))
+            try:
+                self.item(functions)
+            except Error as error:
+                self.errors.append(error)
+                self.recover()
+        if self.errors:
+            raise Errors(self.errors)
         return functions
     def extern(self):
         kind_token, kind = self.quoted('foreign kind')
@@ -1008,15 +1032,22 @@ class Compiler:
                 chunks.append(self.json_impl(sname, fields))
         for name, (kind_token, kind, params, result, symbol) in self.externs.items():
             chunks.append(self.extern_wrapper(name, kind_token, kind, params, result, symbol))
+        problems = []
         for name, params, result, effects, statements in self.functions:
             self.scopes, self.effects, self.result, self.unsafe, self.loops, self.current = [{}], effects, result, False, 0, name.value
-            for param, typ in params:
-                if typ == 'unit' or param.value in self.scopes[0]: raise Error('duplicate or unit parameter', param)
-                self.scopes[0][param.value] = (typ, False)
-            body, returned, _ = self.block(statements)
-            if result != 'unit' and not returned: raise Error('not all paths return a value', name)
+            try:
+                for param, typ in params:
+                    if typ == 'unit' or param.value in self.scopes[0]: raise Error('duplicate or unit parameter', param)
+                    self.scopes[0][param.value] = (typ, False)
+                body, returned, _ = self.block(statements)
+                if result != 'unit' and not returned: raise Error('not all paths return a value', name)
+            except Error as error:
+                problems.append(error)       # one error per function; the others are still checked
+                continue
             arguments = ', '.join('v_' + p.value + ': ' + rust_type(t) for p, t in params)
             chunks.append(f'fn f_{name.value}({arguments}) -> {rust_type(result)} {{\n{body}\n}}')
+        if problems:
+            raise Errors(problems) if len(problems) > 1 else problems[0]
         if self.test_mode:
             arms = ''.join(f'"{n}" => f_{n}(), ' for n in self.test_names)
             chunks.append('fn main() { let name = std::env::args().nth(1).unwrap_or_default(); match name.as_str() { ' + arms +
@@ -1239,26 +1270,32 @@ def main(argv=None):
         elif options.command == 'check': print('OK')
         return 0
     except (Error, OSError, RuntimeError, ValueError) as error:
-        diagnostic = {'ok': False, 'message': str(error)}
-        if isinstance(error, Error):
-            diagnostic.update(line=error.line, column=error.column, code=error.code)
-            if error.hint: diagnostic['hint'] = error.hint
-            if error.suggestion: diagnostic['suggestion'] = error.suggestion
-        if isinstance(error, Error) and error.source: diagnostic['source'] = error.source
-        if isinstance(error, Error) and error.source:
-            try:
-                text = pathlib.Path(error.source).read_text(encoding='utf-8').splitlines()[error.line - 1]
-                diagnostic['snippet'] = text
-                diagnostic['caret'] = ' ' * (error.column - 1) + '^'
-            except (OSError, IndexError, UnicodeError):
-                pass
-        if options.json: print(json.dumps(diagnostic), file=sys.stderr)
+        def describe(item):
+            diagnostic = {'message': str(item)}
+            if isinstance(item, Error):
+                diagnostic.update(line=item.line, column=item.column, code=item.code)
+                if item.hint: diagnostic['hint'] = item.hint
+                if item.suggestion: diagnostic['suggestion'] = item.suggestion
+                if item.source:
+                    diagnostic['source'] = item.source
+                    try:
+                        diagnostic['snippet'] = pathlib.Path(item.source).read_text(encoding='utf-8').splitlines()[item.line - 1]
+                        diagnostic['caret'] = ' ' * (item.column - 1) + '^'
+                    except (OSError, IndexError, UnicodeError):
+                        pass
+            return diagnostic
+        items = error.errors if isinstance(error, Errors) else [error]
+        described = [describe(item) for item in items]
+        if options.json:
+            print(json.dumps(dict(ok=False, **described[0], errors=described)), file=sys.stderr)
         else:
-            print(f'{diagnostic.get("source", options.source)}:{diagnostic.get("line", 1)}:{diagnostic.get("column", 1)}: {error}', file=sys.stderr)
-            if diagnostic.get('snippet') is not None:
-                print('  | ' + diagnostic['snippet'], file=sys.stderr)
-                print('  | ' + diagnostic['caret'], file=sys.stderr)
-            if diagnostic.get('hint'): print('  hint: ' + diagnostic['hint'], file=sys.stderr)
+            for diagnostic in described:
+                print(f'{diagnostic.get("source", options.source)}:{diagnostic.get("line", 1)}:{diagnostic.get("column", 1)}: {diagnostic["message"]}', file=sys.stderr)
+                if diagnostic.get('snippet') is not None:
+                    print('  | ' + diagnostic['snippet'], file=sys.stderr)
+                    print('  | ' + diagnostic['caret'], file=sys.stderr)
+                if diagnostic.get('hint'): print('  hint: ' + diagnostic['hint'], file=sys.stderr)
+            if len(described) > 1: print(f'{len(described)} errors', file=sys.stderr)
         return 1
 
 if __name__ == '__main__':

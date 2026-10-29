@@ -141,7 +141,7 @@ axle brief DIR    # the same orientation as plain text or --json
 
 Add the server to any MCP-capable agent or editor (`examples/mcp.json` shows the shape). The agent then has `axle_brief` (start here), `axle_check` (errors carry the failing source line, a caret and a fix hint), `axle_slice`, `axle_lens`, `axle_audit`, `axle_map`, `axle_test`, `axle_run`, `axle_adopt`, `axle_characterize`, `axle_explain` and `axle_manifest`. Every call runs in a separate process with a time limit. `axle_characterize` runs the project's own code with sample inputs; `axle_adopt` does not.
 
-Type mismatches name the exact conversion (`expected f64, got i64` suggests `f64_from_i64(x)`), and `as_u64` / `as_i64` convert between integer signedness.
+`axle check` reports one error per function (and every syntax error that starts on its own top-level line), so a whole file can be fixed in one pass; `--json` carries them all in `errors`, with the first repeated at the top level. Type mismatches name the exact conversion (`expected f64, got i64` suggests `f64_from_i64(x)`), and `as_u64` / `as_i64` convert between integer signedness.
 
 ## Legacy code and drift
 

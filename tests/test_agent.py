@@ -116,3 +116,34 @@ class McpTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MultiErrorTests(unittest.TestCase):
+    def test_type_errors_in_several_functions_are_all_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn a() -> i64 { return 1.5; }\n\nfn ok() -> i64 { return 1; }\n\nfn c() -> unit {\n    print(1);\n}\n\nfn d() -> i64 { let q = nope; return q; }\n')
+            result = cli('check', path)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('3 errors', result.stderr)
+            data = json.loads(cli('check', path, '--json').stderr)
+            self.assertEqual([e['line'] for e in data['errors']], [1, 6, 9])
+            self.assertEqual(data['line'], 1)                    # the first error is also at the top level
+            self.assertTrue(all('snippet' in e and 'code' in e for e in data['errors']))
+
+    def test_syntax_errors_recover_at_the_next_declaration(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn a() -> i64 { return 1 +; }\nfn ok() -> i64 { return 1; }\nfn b() -> i64 { return @; }\n')
+            data = json.loads(cli('check', path, '--json').stderr)
+            self.assertEqual([e['line'] for e in data['errors']], [1, 3])
+
+    def test_single_error_output_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = cli('check', source(d, 'fn a() -> i64 { return 1.5; }'))
+            self.assertNotIn('errors', result.stderr)
+
+    def test_mcp_check_returns_every_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn a() -> i64 { return 1.5; }\nfn b() -> i64 { return nope; }\n')
+            text, failed = mcp_server.call('axle_check', {'path': str(path)})
+            self.assertTrue(failed)
+            self.assertEqual(len(json.loads(text)['errors']), 2)

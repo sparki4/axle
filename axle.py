@@ -931,6 +931,7 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true', help='machine-readable compiler diagnostics')
     parser.add_argument('--strict', action='store_true', help='also fail on patterns that usually hide failures (see `axle explain E080`)')
     parser.add_argument('--filter', help='test: only run tests whose name contains this text')
+    parser.add_argument('--include-tests', action='store_true', help='adopt: also scan test, example, docs and benchmark directories')
     parser.add_argument('--check', action='store_true', help='adopt: fail if the existing bindings are out of date')
     parser.add_argument('--line', type=int, help='lens: source line to explain')
     parser.add_argument('--fn', help='slice: function to extract context for')
@@ -956,7 +957,7 @@ def main(argv=None):
                     for line in removed: print('  - ' + line + '   (gone or changed in the source)')
                     print('run `axle adopt` to refresh')
                 return 0 if ok else 1
-            report = adopt.run(options.source, options.output)
+            report = adopt.run(options.source, options.output, options.include_tests)
             if options.json: print(json.dumps(report))
             else:
                 langs = ', '.join(f'{n} {k}' for k, n in sorted(report['bound_by_language'].items())) or 'nothing'

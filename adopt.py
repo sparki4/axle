@@ -19,6 +19,9 @@ import re
 
 SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'venv', '.venv', 'env', 'target', 'build', 'dist',
              '.axle', 'site-packages', '.tox', '.mypy_cache', '.pytest_cache', 'vendor'}
+# Not part of a project's own interface; skipped unless --include-tests is given.
+NON_API_DIRS = {'test', 'tests', 'testing', 'typing_tests', 'example', 'examples', 'doc', 'docs', 'bench', 'benchmark', 'benchmarks',
+                'third_party', 'thirdparty', 'unity', 'fuzz', 'fuzzing', 'samples', 'contrib'}
 MAX_FILES = 5000
 MAX_BYTES = 2_000_000
 
@@ -86,6 +89,9 @@ def scan_python(path, rel, found, skipped):
             continue
         reason, params = None, []
         args = node.args
+        if node.decorator_list:
+            skipped.append(dict(language='py', file=rel, name=node.name, reason='decorated: the decorator may change how the function is called'))
+            continue
         if args.vararg or args.kwarg or args.kwonlyargs:
             reason = 'uses *args, **kwargs or keyword-only parameters'
         positional = args.posonlyargs + args.args
@@ -322,10 +328,11 @@ def scan_rust(path, rel, found, skipped):
 
 # ---------------------------------------------------------------- driver
 
-def walk(root):
+def walk(root, include_tests=False):
     count = 0
+    drop = SKIP_DIRS if include_tests else SKIP_DIRS | NON_API_DIRS
     for current, dirs, files in os.walk(root):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith('.'))
+        dirs[:] = sorted(d for d in dirs if d not in drop and not d.startswith('.'))
         for name in sorted(files):
             count += 1
             if count > MAX_FILES:
@@ -372,14 +379,14 @@ def check(root, out_dir=None):
     return not added and not removed, added, removed, None
 
 
-def run(root, out_dir=None):
+def run(root, out_dir=None, include_tests=False):
     root = pathlib.Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f'{root} is not a directory')
     out_dir = pathlib.Path(out_dir).resolve() if out_dir else root / '.axle'
     out_dir.mkdir(parents=True, exist_ok=True)
     found, skipped, defined_in, header_protos, scanned, legacy = [], [], {}, [], 0, []
-    for path in walk(root):
+    for path in walk(root, include_tests):
         try:
             path.relative_to(out_dir)
             continue

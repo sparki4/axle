@@ -147,3 +147,19 @@ class MultiErrorTests(unittest.TestCase):
             text, failed = mcp_server.call('axle_check', {'path': str(path)})
             self.assertTrue(failed)
             self.assertEqual(len(json.loads(text)['errors']), 2)
+
+
+class DivOrTests(unittest.TestCase):
+    def test_div_or_is_allowed_under_nothrow_and_plain_division_is_not(self):
+        with tempfile.TemporaryDirectory() as d:
+            ok = source(d, 'fn f(a: u64, b: u64) -> u64 nothrow noalloc { return u64_div_or(a, b, 0u64) + u64_rem_or(a, b, 1u64); }\nfn main() -> unit { }')
+            self.assertEqual(cli('check', ok).returncode, 0)
+            bad = source(d, 'fn f(a: u64, b: u64) -> u64 nothrow { if b == 0u64 { return 0u64; } return a / b; }\nfn main() -> unit { }', 'bad.axl')
+            result = cli('check', bad)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('u64_div_or', result.stderr)
+
+    def test_values(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn main() -> unit ![io] { print(i64_div_or(-7, 2, 0)); print(i64_div_or(7, 0, 99)); print(u64_rem_or(7u64, 4u64, 0u64)); print(u64_rem_or(7u64, 0u64, 5u64)); }')
+            self.assertEqual(cli('run', path).stdout.split(), ['-3', '99', '3', '5'])

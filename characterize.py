@@ -14,10 +14,12 @@ import subprocess
 import sys
 import tempfile
 
+import adopt
 import axle
 
 VALUES = {'i64': ['0', '1', '-1', '2', '7', '100', '1000'], 'u64': ['0u64', '1u64', '2u64', '7u64', '100u64', '1000u64'],
-          'bool': ['false', 'true'], 'f64': ['0.0', '1.0', '-1.5', '2.5', '100.0']}
+          'bool': ['false', 'true'], 'f64': ['0.0', '1.0', '-1.5', '2.5', '100.0'],
+          'str': ['""', '"a"', '"hello"', '"Hello, World"', '"12"']}
 MAX_CASES = 12
 
 
@@ -40,6 +42,8 @@ def cases_for(params):
 def literal(kind, text):
     if kind == 'bool':
         return 'true' if text.strip() in {'true', 'True', '1'} else 'false'
+    if kind == 'str':
+        return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
     if kind == 'f64':
         return text.strip() if text.strip().replace('.', '', 1).lstrip('-').isdigit() else None
     if kind == 'u64':
@@ -54,13 +58,17 @@ def run(root, out_dir=None, link_search=(), link_arg=()):
     if not map_path.exists():
         raise axle.Error('no axle.map.json found', hint=f'run `axle adopt {root}` first')
     report = json.loads(map_path.read_text(encoding='utf-8'))
+    for entry in report['bindings']:
+        entry['result'] = adopt.VISIBLE.get(entry.get('result'), entry.get('result'))
+        for param in entry.get('params', []):
+            param['type'] = adopt.VISIBLE.get(param['type'], param['type'])
     targets, skipped = [], []
     for entry in report['bindings']:
         name = entry['name']
         if entry.get('call') != 'safe' or entry.get('status') != 'bound':
             skipped.append(dict(name=name, reason='needs unsafe or a link step, or is not directly callable'))
             continue
-        if entry['result'] not in {'i64', 'u64', 'bool', 'f64'}:
+        if entry['result'] not in {'i64', 'u64', 'bool', 'f64', 'str'}:
             skipped.append(dict(name=name, reason=f'result type {entry["result"]} cannot be recorded'))
             continue
         cases = cases_for(entry['params'])
@@ -90,7 +98,10 @@ def run(root, out_dir=None, link_search=(), link_arg=()):
             for number, (entry, case) in enumerate(index):
                 process = subprocess.run([str(exe), str(number)], capture_output=True, text=True, timeout=60)
                 key = (entry['name'], case)
-                if process.returncode == 0 and process.stdout.strip():
+                text = process.stdout[:-1] if process.stdout.endswith('\n') else process.stdout
+                if process.returncode == 0 and entry['result'] == 'str' and '\n' not in text:
+                    observed[key] = text
+                elif process.returncode == 0 and entry['result'] != 'str' and process.stdout.strip():
                     observed[key] = process.stdout.strip().splitlines()[-1]
                 else:
                     aborts.append(dict(function=entry['name'], inputs=list(case), detail=(process.stderr.strip().splitlines() or ['no output'])[0][:200]))

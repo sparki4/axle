@@ -43,7 +43,7 @@ C_POINTEES = {'int64_t': '*i64', 'long long': '*i64', 'long long int': '*i64', '
 RUST_SCALARS = {'i64': 'i64', 'u64': 'u64', 'bool': 'bool', 'i32': 'c_int', 'u32': 'c_uint', 'usize': 'c_size',
                 'c_int': 'c_int', 'c_uint': 'c_uint', 'c_long': 'c_long', 'c_ulong': 'c_ulong', 'c_longlong': 'i64',
                 'c_ulonglong': 'u64', 'f64': 'f64', 'c_double': 'f64'}
-JS_SCALARS = {'number': 'i64', 'bigint': 'i64', 'boolean': 'bool', 'void': 'unit', 'undefined': 'unit', 'null': 'unit'}
+JS_SCALARS = {'string': 'str', 'number': 'i64', 'bigint': 'i64', 'boolean': 'bool', 'void': 'unit', 'undefined': 'unit', 'null': 'unit'}
 
 
 class Found:
@@ -97,14 +97,14 @@ def scan_python(path, rel, found, skipped):
         positional = args.posonlyargs + args.args
         defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
         for arg, default in zip(positional, defaults):
-            typ = {'int': 'i64', 'bool': 'bool', 'float': 'f64'}.get(ast.unparse(arg.annotation)) if arg.annotation else None
+            typ = {'int': 'i64', 'bool': 'bool', 'float': 'f64', 'str': 'str'}.get(ast.unparse(arg.annotation)) if arg.annotation else None
             if typ is None and arg.annotation is None and isinstance(default, ast.Constant):
                 typ = 'bool' if isinstance(default.value, bool) else 'i64' if isinstance(default.value, int) else None
             if typ is None:
                 reason = reason or f'parameter {arg.arg!r} needs an `int` or `bool` annotation'
             params.append((arg.arg, typ))
         if node.returns is not None:
-            result = {'int': 'i64', 'bool': 'bool', 'float': 'f64', 'None': 'unit'}.get(ast.unparse(node.returns))
+            result = {'int': 'i64', 'bool': 'bool', 'float': 'f64', 'str': 'str', 'None': 'unit'}.get(ast.unparse(node.returns))
             if result is None:
                 reason = reason or f'return type {ast.unparse(node.returns)} is not int, bool or None'
         else:
@@ -221,6 +221,8 @@ def c_chunks(text):
 
 
 def c_type(words, stars, pointer_ok=True):
+    if stars == 1 and pointer_ok and 'const' in words and [w for w in words if w not in {'const', 'volatile', 'restrict', '__restrict'}] == ['char']:
+        return 'c_str'      # read-only NUL-terminated text; a plain `char *` may be written to, so it is not adopted
     base = ' '.join(w for w in words if w not in {'const', 'volatile', 'extern', 'restrict', '__restrict'})
     if stars == 0:
         return C_SCALARS.get(base)
@@ -251,10 +253,11 @@ def parse_c_prototype(head):
             plain = [w for w in words if w not in {'const', 'volatile', 'restrict', '__restrict'}]
             name = None
             if len(plain) > 1 and ' '.join(plain) not in C_SCALARS and ' '.join(plain) not in C_POINTEES:
-                name, words = plain[-1], plain[:-1]
+                name = plain[-1]
+                words = words[:len(words) - 1 - words[::-1].index(name)] + words[len(words) - words[::-1].index(name):]
             typ = c_type(words, stars)
             if typ is None or typ == 'unit':
-                reason = reason or f'parameter type `{part.strip()}` has no AXLE equivalent yet (strings, structs, 32-bit floats, void* are not supported)'
+                reason = reason or f'parameter type `{part.strip()}` has no AXLE equivalent yet (mutable `char *` buffers, structs, 32-bit floats, void* are not supported)'
             params.append((ident(name, f'arg{index}'), typ))
     if result is None:
         reason = reason or f'return type `{m["ret"].strip()}` has no AXLE equivalent yet'
@@ -344,7 +347,7 @@ def rel_posix(target, base):
     return pathlib.Path(os.path.relpath(target, base)).as_posix()
 
 
-VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
+VISIBLE = {'c_str': 'str', 'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
 
 
 def visible_sig(name, params, result, effects=None):
@@ -480,7 +483,7 @@ def run(root, out_dir=None, include_tests=False):
         'bound': len(entries), 'skipped_count': len(skipped), 'bound_by_language': by_lang,
         'how_to_use': [f'import "{rel_posix(bindings, root)}";   // path relative to your .axl file', 'declare ![io] on callers',
                        'call `call: safe` entries directly; `call: unsafe` entries need an unsafe block'],
-        'supported_types': 'i64, u64, f64, bool, unit; C widths via c_int/c_uint/c_long/c_ulong/c_size; *i64/*u64/*bool pointers (C only)',
+        'supported_types': 'i64, u64, f64, str, bool, unit; C widths via c_int/c_uint/c_long/c_ulong/c_size; *i64/*u64/*bool pointers (C only)',
         'bindings': entries, 'skipped': skipped, 'legacy': legacy,
     }
     if legacy:

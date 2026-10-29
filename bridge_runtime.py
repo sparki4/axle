@@ -36,6 +36,7 @@ for line in sys.stdin:
         if not callable(function):
             raise AttributeError("no callable named %s in %s" % (parts[0], target))
         def convert(a):
+            if a.startswith("s:"): return bytes.fromhex(a[2:]).decode("utf-8")
             if a == "true": return True
             if a == "false": return False
             try: return int(a)
@@ -48,10 +49,12 @@ for line in sys.stdin:
             reply("ok " + ("true" if result else "false"))
         elif isinstance(result, int):
             reply("ok %d" % result)
+        elif isinstance(result, str):
+            reply("ok s:" + result.encode("utf-8").hex())
         elif isinstance(result, float):
             reply("ok " + repr(result))
         else:
-            reply("err unsupported return type %s (bridges carry i64, u64, f64, bool and unit)" % type(result).__name__)
+            reply("err unsupported return type %s (bridges carry i64, u64, f64, str, bool and unit)" % type(result).__name__)
     except BaseException as error:
         reply("err %s: %s" % (type(error).__name__, str(error).replace("\n", " ")))
 '''
@@ -71,6 +74,7 @@ const ready = (async () => {
   } catch (error) { failure = "cannot load " + target + ": " + ((error && error.message) || error); }
 })();
 function parse(a) {
+  if (a.startsWith("s:")) return Buffer.from(a.slice(2), "hex").toString("utf8");
   if (a === "true") return true;
   if (a === "false") return false;
   if (/[.eEnNiI]/.test(a) && !/^-?\d+$/.test(a)) return Number(a);
@@ -89,7 +93,8 @@ async function handle(line) {
     if (result === undefined || result === null) reply("ok unit");
     else if (typeof result === "boolean" || typeof result === "bigint") reply("ok " + result);
     else if (typeof result === "number") reply("ok " + result);
-    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, f64, bool and unit)");
+    else if (typeof result === "string") reply("ok s:" + Buffer.from(result, "utf8").toString("hex"));
+    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, f64, str, bool and unit)");
   } catch (error) { reply("err " + String((error && error.message) || error).replace(/\n/g, " ")); }
 }
 let chain = Promise.resolve();
@@ -101,6 +106,18 @@ struct AxleWorker { key: String, child: std::process::Child, stdin: std::process
 thread_local! { static AXLE_WORKERS: std::cell::RefCell<Vec<AxleWorker>> = std::cell::RefCell::new(Vec::new()); }
 const AXLE_PY_SERVER: &str = r####"@PY@"####;
 const AXLE_JS_SERVER: &str = r####"@JS@"####;
+fn axle_hex_arg(text: &str) -> String {
+    let mut out = String::from("s:");
+    for byte in text.as_bytes() { out.push_str(&format!("{:02x}", byte)); }
+    out
+}
+fn axle_hex_decode(reply: &str) -> Option<String> {
+    let digits = reply.strip_prefix("s:")?;
+    if digits.len() % 2 != 0 { return None; }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for i in (0..digits.len()).step_by(2) { bytes.push(u8::from_str_radix(digits.get(i..i + 2)?, 16).ok()?); }
+    String::from_utf8(bytes).ok()
+}
 fn axle_bridge_fail(function: &str, what: &str, detail: &str) -> ! {
     panic!("axle bridge error in {}: {} {}", function, what, detail)
 }

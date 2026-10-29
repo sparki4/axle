@@ -16,8 +16,26 @@ import bridge_runtime
 
 VERSION = '0.4.0'
 EDITION = '0.4'
-TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64', 'f64'}
+TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64', 'f64', 'str'}
 NUMERIC = {'i64', 'u64', 'f64'}
+# name: (parameter types, result, Rust template with $0, $1, ..., allocates, can abort, why it can abort)
+STR_FUNCS = {
+    'str_len': (['str'], 'u64', '(($0).len() as u64)', False, None),
+    'str_byte': (['str', 'u64'], 'u64', '(($0).as_bytes()[($1) as usize] as u64)', False, 'index past the end of the string'),
+    'str_slice': (['str', 'u64', 'u64'], 'str', 'String::from(&($0)[($1) as usize..($2) as usize])', True, 'range outside the string or inside a multi-byte character'),
+    'str_find': (['str', 'str'], 'i64', '(($0).find(&*($1)).map(|i| i as i64).unwrap_or(-1))', False, None),
+    'str_starts_with': (['str', 'str'], 'bool', '($0).starts_with(&*($1))', False, None),
+    'str_ends_with': (['str', 'str'], 'bool', '($0).ends_with(&*($1))', False, None),
+    'str_from_i64': (['i64'], 'str', '($0).to_string()', True, None),
+    'str_from_u64': (['u64'], 'str', '($0).to_string()', True, None),
+    'str_from_f64': (['f64'], 'str', 'format!("{:?}", $0)', True, None),
+    'str_parse_i64': (['str', 'i64'], 'i64', '($0).trim().parse::<i64>().unwrap_or($1)', False, None),
+    'str_parse_f64': (['str', 'f64'], 'f64', '($0).trim().parse::<f64>().unwrap_or($1)', False, None),
+    'str_upper': (['str'], 'str', '($0).to_uppercase()', True, None),
+    'str_lower': (['str'], 'str', '($0).to_lowercase()', True, None),
+    'str_trim': (['str'], 'str', '($0).trim().to_string()', True, None),
+}
+STR_ESCAPES = {'n': '\\n', 't': '\\t', 'r': '\\r', '0': '\\0', '\\': '\\\\', '"': '\\"'}
 # name: (parameter types, result, Rust template). f64 never aborts: IEEE 754 gives inf/NaN instead.
 F64_FUNCS = {
     'f64_from_i64': (['i64'], 'f64', '(({0}) as f64)'), 'f64_from_u64': (['u64'], 'f64', '(({0}) as f64)'),
@@ -117,7 +135,7 @@ class Token:
     bad: bool = False
 
 def lex(source, source_name=None):
-    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
+    pattern = re.compile(r'\s+|//[^\n]*|"(?:[^"\\\n]|\\.)*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
     tokens, pos, line, column = [], 0, 1, 1
     while pos < len(source):
         match = pattern.match(source, pos)
@@ -139,15 +157,15 @@ def lex(source, source_name=None):
     tokens.append(Token('<eof>', line, column, source_name))
     return tokens
 
-ABI_TYPES = {'c_int': 'std::ffi::c_int', 'c_uint': 'std::ffi::c_uint', 'c_long': 'std::ffi::c_long',
+ABI_TYPES = {'c_str': '*const std::ffi::c_char', 'c_int': 'std::ffi::c_int', 'c_uint': 'std::ffi::c_uint', 'c_long': 'std::ffi::c_long',
              'c_ulong': 'std::ffi::c_ulong', 'c_size': 'usize'}
-ABI_VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
+ABI_VISIBLE = {'c_str': 'str', 'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
 RESERVED = TYPES | set(ABI_TYPES) | {'import', 'fn', 'let', 'var', 'return', 'if', 'else', 'while', 'unsafe', 'true', 'false',
                                      'io', 'mem', 'extern', 'link', 'native', 'break', 'continue',
                                      'nothrow', 'noalloc', 'edition'}
 BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'offset',
             'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec',
-            'abort', 'unimplemented'} | set(F64_FUNCS)
+            'abort', 'unimplemented', 'arg_str'} | set(F64_FUNCS) | set(STR_FUNCS)
 
 class Parser:
     def __init__(self, source, source_name=None):
@@ -338,6 +356,8 @@ class Parser:
             self.need(')')
         elif re.fullmatch(r'[0-9]+(?:u64|i64)?|' + FLOAT, token.value):
             left = ('number', token)
+        elif token.value.startswith('"'):
+            left = ('string', token)
         elif token.value in {'true', 'false'}:
             left = ('bool', token)
         elif re.fullmatch('[A-Za-z_][A-Za-z_0-9]*', token.value) and token.value not in RESERVED:
@@ -361,7 +381,7 @@ class Parser:
 FLOAT = r'[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64'
 
 def rust_type(typ):
-    return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else typ
+    return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else 'String' if typ == 'str' else typ
 
 def check_edition(parser):
     if parser.edition is not None and parser.edition != EDITION:
@@ -406,6 +426,8 @@ class Compiler:
                 raise Error('duplicate or reserved function name', name)
             lang = kind.split(':', 1)[0]
             for param, typ in params:
+                if typ == 'str' and lang == 'c':
+                    raise Error('extern "c" cannot take str directly', param, hint='declare the parameter as c_str (a NUL-terminated const char*)')
                 if typ in {'unit', 'buf_u64'} or (lang != 'c' and typ.startswith('*')):
                     raise Error(f'extern parameter type {typ} is not supported for {lang!r} externs', param)
             if result == 'buf_u64' or (lang != 'c' and result.startswith('*')):
@@ -463,10 +485,24 @@ class Compiler:
                 raise Error('integer literal out of range', token)
             return typ, str(number) + typ
         if kind == 'bool': return 'bool', value
+        if kind == 'string':
+            out, i = [], 1
+            while i < len(value) - 1:
+                ch = value[i]
+                if ch == '\\':
+                    i += 1
+                    if value[i] not in STR_ESCAPES:
+                        raise Error(f'unknown escape \\{value[i]} in string', token, hint='supported escapes: \\n \\t \\r \\0 \\\\ \\"')
+                    out.append(STR_ESCAPES[value[i]])
+                elif ord(ch) < 32: out.append('\\u{%x}' % ord(ch))
+                else: out.append(ch)
+                i += 1
+            self.note('alloc', token, what='string literal', via='"..."')
+            return 'str', 'String::from("' + ''.join(out) + '")'
         if kind == 'name':
             typ, mutable = self.lookup(token)
             code = 'v_' + value
-            return typ, code + '.clone()' if typ == 'buf_u64' else code
+            return typ, code + '.clone()' if typ in {'buf_u64', 'str'} else code
         if kind == 'unary':
             if value == '-' and rest[0][0] == 'number' and rest[0][1].value in {'9223372036854775808', '9223372036854775808i64'}:
                 return 'i64', 'i64::MIN'
@@ -490,8 +526,16 @@ class Compiler:
                 if lt in {'unit', 'buf_u64'}: raise Error(lt + ' cannot be compared', token)
             elif lt == 'f64' and value in {'&', '|', '^', '<<', '>>'}:
                 raise Error(f'operator {value} is not defined for f64', token, hint='bit operations need integers; use f64_to_bits to inspect the bits')
-            elif lt not in NUMERIC:
+            elif lt not in NUMERIC and lt != 'str':
                 raise Error('operator requires integer operands', token)
+            if lt == 'str':
+                if value == '+':
+                    self.effect('mem', token)
+                    self.note('alloc', token, what='concatenated string', via='+', effect='mem')
+                    return 'str', f'{{ let mut axle_text = {lc}; axle_text.push_str(&({rc})); axle_text }}'
+                if value not in {'==', '!=', '<', '>', '<=', '>='}:
+                    raise Error(f'operator {value} is not defined for str', token, hint='strings support + (concatenation) and comparisons')
+                return 'bool', f'(({lc}) {value} ({rc}))'
             if lt == 'f64':
                 return ('bool' if value in {'==', '!=', '<', '>', '<=', '>='} else 'f64'), f'(({lc}) {value} ({rc}))'
             methods = {'+': 'wrapping_add', '-': 'wrapping_sub', '*': 'wrapping_mul',
@@ -529,6 +573,23 @@ class Compiler:
                 self.note('foreign', token, abi='polyglot', symbol=f'block {index}', effect='io')
                 self.note('abort', token, why='a failing guest block aborts the program', via='poly_exec')
                 return 'unit', self.foreign_commands[index]
+            if value in STR_FUNCS:
+                want, result, template, allocates, abort_why = STR_FUNCS[value]
+                if types != want: raise Error(f'{value} requires ({", ".join(want)}), got ({", ".join(types)})', token)
+                if allocates:
+                    self.effect('mem', token)
+                    self.note('alloc', token, what='string', via=value, effect='mem')
+                if abort_why: self.note('abort', token, why=abort_why, via=value)
+                code = template
+                for index in reversed(range(len(codes))): code = code.replace(f'${index}', codes[index])
+                return result, code
+            if value == 'arg_str':
+                self.effect('io', token)
+                self.effect('mem', token)
+                if types != ['u64']: raise Error('arg_str requires one u64 index', token)
+                self.note('abort', token, why='missing command-line argument', via='arg_str', effect='io')
+                self.note('alloc', token, what='string', via='arg_str', effect='mem')
+                return 'str', f'std::env::args().nth(({codes[0]}) as usize).unwrap_or_else(|| panic!("missing command-line argument"))'
             if value in F64_FUNCS:
                 want, result, template = F64_FUNCS[value]
                 if types != want: raise Error(f'{value} requires ({", ".join(want)}), got ({", ".join(types)})', token)
@@ -582,7 +643,7 @@ class Compiler:
                 return 'unit', f'{{ let axle_pointer = {codes[0]}; let axle_value = {codes[1]}; unsafe {{ *axle_pointer = axle_value; }} }}'
             if value == 'print':
                 self.effect('io', token)
-                if len(types) != 1 or types[0] not in {'i64', 'u64', 'bool', 'f64'}: raise Error('print requires one scalar', token)
+                if len(types) != 1 or types[0] not in {'i64', 'u64', 'bool', 'f64', 'str'}: raise Error('print requires one scalar or str', token)
                 self.note('io', token, what='prints to standard output', effect='io')
                 self.note('abort', token, why='standard output can fail (for example a closed pipe)', via='print', effect='io')
                 return 'unit', 'println!("' + ('{:?}' if types[0] == 'f64' else '{}') + '", ' + codes[0] + ')'
@@ -694,14 +755,21 @@ class Compiler:
             lines, raw_args, raw_params = [], [], []
             for i, (p, t) in enumerate(params):
                 raw_params.append(f'a{i}: {ABI_TYPES.get(t, rust_type(t))}')
-                if t in ABI_TYPES:
+                if t == 'c_str':
+                    lines.append(f'let a{i} = std::ffi::CString::new(v_{p.value}.as_bytes()).unwrap_or_else(|_| panic!("argument {p.value} of {symbol} contains a NUL byte"));')
+                    raw_args.append(f'a{i}.as_ptr()')
+                elif t in ABI_TYPES:
                     lines.append(f'let a{i} = <{ABI_TYPES[t]}>::try_from(v_{p.value}).unwrap_or_else(|_| panic!("argument {p.value} of {symbol} does not fit {t}"));')
                     raw_args.append(f'a{i}')
                 else:
                     raw_args.append(f'v_{p.value}')
             raw_result = '' if result == 'unit' else ' -> ' + ABI_TYPES.get(result, rust_type(result))
             call = f'unsafe {{ raw({", ".join(raw_args)}) }}'
-            tail = f'({call}) as {rust_type(visible(result))}' if result in ABI_TYPES else call
+            if result == 'c_str':
+                tail = (f'let p = {call};\nif p.is_null() {{ panic!("{symbol} returned NULL") }}\n'
+                        'unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned()')
+            else:
+                tail = f'({call}) as {rust_type(visible(result))}' if result in ABI_TYPES else call
             declaration = f'extern "C" {{ #[link_name = {rust_literal(symbol)}] fn raw({", ".join(raw_params)}){raw_result}; }}'
             return head + ' {\n' + declaration + '\n' + '\n'.join(lines) + '\n' + tail + '\n}'
         lang, spec = kind.split(':', 1)
@@ -715,11 +783,13 @@ class Compiler:
         else:
             target = spec
         root_dir = str((base / root).resolve()) if root else (str(pathlib.Path(target).parent) if spec.endswith(suffixes) else str(base))
-        values = ', '.join(f'format!("{{:?}}", v_{p.value})' if t == 'f64' else f'v_{p.value}.to_string()' for p, t in params)
+        values = ', '.join(f'format!("{{:?}}", v_{p.value})' if t == 'f64' else f'axle_hex_arg(&v_{p.value})' if t == 'str' else f'v_{p.value}.to_string()' for p, t in params)
         call = f'axle_bridge_call({rust_literal(lang)}, {rust_literal(target)}, {rust_literal(root_dir)}, {rust_literal(symbol)}, &[{values}])'
         if result == 'unit': tail = f'let _ = {call};'
         elif result == 'bool':
             tail = f'let reply = {call};\nmatch reply.as_str() {{ "true" => true, "false" => false, _ => axle_bridge_fail({rust_literal(symbol)}, "expected a bool result, got", &reply) }}'
+        elif result == 'str':
+            tail = f'let reply = {call};\naxle_hex_decode(&reply).unwrap_or_else(|| axle_bridge_fail({rust_literal(symbol)}, "expected a str result, got", &reply))'
         else:
             tail = f'let reply = {call};\nreply.parse::<{result}>().unwrap_or_else(|_| axle_bridge_fail({rust_literal(symbol)}, "expected a {result} result, got", &reply))'
         return head + ' {\n' + tail + '\n}'

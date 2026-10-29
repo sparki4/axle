@@ -49,7 +49,7 @@ Discuss each extension before implementing it:
 
 - Records with specified layouts and predictable field access.
 - Checked slices and generic containers with explicit ownership rules.
-- Additional scalar widths (`f32`, narrower integers) and useful string types. `f64` is done.
+- Additional scalar widths (`f32`, narrower integers) and byte buffers. `f64` and immutable `str` are done.
 - Module namespaces and build/project integration.
 
 Syntax should stay easy to generate, review, and diagnose. Language growth should preserve defined integer behavior and visible resource/effect contracts.

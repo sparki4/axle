@@ -5,7 +5,7 @@ one-line text protocol over its stdin/stdout.  Replies are prefixed with the
 control byte 0x01 so the foreign code's own prints pass through untouched.
 """
 
-PY_SERVER = r'''import sys, os, importlib, importlib.util
+PY_SERVER = r'''import sys, os, json, importlib, importlib.util
 target, root = sys.argv[1], sys.argv[2]
 out = sys.__stdout__
 def reply(text):
@@ -37,6 +37,7 @@ for line in sys.stdin:
             raise AttributeError("no callable named %s in %s" % (parts[0], target))
         def convert(a):
             if a.startswith("s:"): return bytes.fromhex(a[2:]).decode("utf-8")
+            if a.startswith("r:"): return json.loads(bytes.fromhex(a[2:]).decode("utf-8"))
             if a == "true": return True
             if a == "false": return False
             try: return int(a)
@@ -51,10 +52,12 @@ for line in sys.stdin:
             reply("ok %d" % result)
         elif isinstance(result, str):
             reply("ok s:" + result.encode("utf-8").hex())
+        elif isinstance(result, dict):
+            reply("ok r:" + json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8").hex())
         elif isinstance(result, float):
             reply("ok " + repr(result))
         else:
-            reply("err unsupported return type %s (bridges carry i64, u64, f64, str, bool and unit)" % type(result).__name__)
+            reply("err unsupported return type %s (bridges carry i64, u64, f64, str, bool, unit and structs as dicts/objects)" % type(result).__name__)
     except BaseException as error:
         reply("err %s: %s" % (type(error).__name__, str(error).replace("\n", " ")))
 '''
@@ -75,6 +78,7 @@ const ready = (async () => {
 })();
 function parse(a) {
   if (a.startsWith("s:")) return Buffer.from(a.slice(2), "hex").toString("utf8");
+  if (a.startsWith("r:")) return JSON.parse(Buffer.from(a.slice(2), "hex").toString("utf8"));
   if (a === "true") return true;
   if (a === "false") return false;
   if (/[.eEnNiI]/.test(a) && !/^-?\d+$/.test(a)) return Number(a);
@@ -93,8 +97,9 @@ async function handle(line) {
     if (result === undefined || result === null) reply("ok unit");
     else if (typeof result === "boolean" || typeof result === "bigint") reply("ok " + result);
     else if (typeof result === "number") reply("ok " + result);
+    else if (typeof result === "object") reply("ok r:" + Buffer.from(JSON.stringify(result), "utf8").toString("hex"));
     else if (typeof result === "string") reply("ok s:" + Buffer.from(result, "utf8").toString("hex"));
-    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, f64, str, bool and unit)");
+    else reply("err unsupported return value " + String(result) + " (bridges carry i64, u64, f64, str, bool, unit and structs as dicts/objects)");
   } catch (error) { reply("err " + String((error && error.message) || error).replace(/\n/g, " ")); }
 }
 let chain = Promise.resolve();
@@ -118,6 +123,56 @@ fn axle_hex_decode(reply: &str) -> Option<String> {
     for i in (0..digits.len()).step_by(2) { bytes.push(u8::from_str_radix(digits.get(i..i + 2)?, 16).ok()?); }
     String::from_utf8(bytes).ok()
 }
+fn axle_rec_arg(json: &str) -> String { format!("r:{}", &axle_hex_arg(json)[2..]) }
+fn axle_rec_decode(reply: &str) -> Option<String> { axle_hex_decode(&format!("s:{}", reply.strip_prefix("r:")?)) }
+enum AxleJson { Num(String), Str(String), Bool(bool), Null, Obj(Vec<(String, AxleJson)>) }
+fn axle_json_get<'a>(fields: &'a [(String, AxleJson)], name: &str) -> Option<&'a AxleJson> { fields.iter().find(|(k, _)| k == name).map(|(_, v)| v) }
+fn axle_json_str(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() { match c { '"' => out.push_str("\\\""), '\\' => out.push_str("\\\\"), c if (c as u32) < 32 => out.push_str(&format!("\\u{:04x}", c as u32)), c => out.push(c) } }
+    out.push('"');
+    out
+}
+fn axle_json_f64(value: f64) -> String { if value.is_finite() { format!("{:?}", value) } else { panic!("a non-finite f64 cannot be sent to a foreign function inside a struct") } }
+struct AxleJsonReader { chars: Vec<char>, at: usize }
+impl AxleJsonReader {
+    fn skip(&mut self) { while self.at < self.chars.len() && self.chars[self.at].is_whitespace() { self.at += 1; } }
+    fn eat(&mut self, c: char) -> Option<()> { self.skip(); if self.chars.get(self.at) == Some(&c) { self.at += 1; Some(()) } else { None } }
+    fn word(&mut self, w: &str) -> bool { let n = w.chars().count(); if self.chars[self.at..].iter().take(n).collect::<String>() == w { self.at += n; true } else { false } }
+    fn hex4(&mut self) -> Option<u32> { let text: String = self.chars.get(self.at..self.at + 4)?.iter().collect(); self.at += 4; u32::from_str_radix(&text, 16).ok() }
+    fn string(&mut self) -> Option<String> {
+        self.eat('"')?;
+        let mut out = String::new();
+        loop {
+            let c = *self.chars.get(self.at)?; self.at += 1;
+            match c {
+                '"' => return Some(out),
+                '\\' => { let e = *self.chars.get(self.at)?; self.at += 1; match e {
+                    'n' => out.push('\n'), 't' => out.push('\t'), 'r' => out.push('\r'), 'b' => out.push('\u{8}'), 'f' => out.push('\u{c}'),
+                    '"' | '\\' | '/' => out.push(e),
+                    'u' => { let mut code = self.hex4()?; if (0xD800..0xDC00).contains(&code) { if !(self.word("\\u")) { return None; } let low = self.hex4()?; code = 0x10000 + ((code - 0xD800) << 10) + (low.checked_sub(0xDC00)?); } out.push(char::from_u32(code)?); }
+                    _ => return None } }
+                c => out.push(c),
+            }
+        }
+    }
+    fn value(&mut self) -> Option<AxleJson> {
+        self.skip();
+        match self.chars.get(self.at).copied()? {
+            '{' => { self.at += 1; let mut fields = Vec::new(); self.skip();
+                if self.chars.get(self.at) == Some(&'}') { self.at += 1; return Some(AxleJson::Obj(fields)); }
+                loop { let key = self.string()?; self.eat(':')?; let v = self.value()?; fields.push((key, v)); self.skip();
+                    match self.chars.get(self.at)? { ',' => { self.at += 1; } '}' => { self.at += 1; return Some(AxleJson::Obj(fields)); } _ => return None } } }
+            '"' => Some(AxleJson::Str(self.string()?)),
+            't' if self.word("true") => Some(AxleJson::Bool(true)),
+            'f' if self.word("false") => Some(AxleJson::Bool(false)),
+            'n' if self.word("null") => Some(AxleJson::Null),
+            c if c.is_ascii_digit() || c == '-' => { let start = self.at; while self.at < self.chars.len() && "+-.eE0123456789".contains(self.chars[self.at]) { self.at += 1; } Some(AxleJson::Num(self.chars[start..self.at].iter().collect())) }
+            _ => None,
+        }
+    }
+}
+fn axle_json_parse(text: &str) -> Option<AxleJson> { let mut r = AxleJsonReader { chars: text.chars().collect(), at: 0 }; let v = r.value()?; r.skip(); if r.at == r.chars.len() { Some(v) } else { None } }
 fn axle_bridge_fail(function: &str, what: &str, detail: &str) -> ! {
     panic!("axle bridge error in {}: {} {}", function, what, detail)
 }

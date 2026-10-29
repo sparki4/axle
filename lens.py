@@ -81,7 +81,7 @@ class Analysis:
         self.loaded = axle.load_program(path)
         loaded = self.loaded
         self.compiler = axle.Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links,
-                                      natives=loaded.natives, guarantees=loaded.guarantees, require_main=False)
+                                      natives=loaded.natives, guarantees=loaded.guarantees, require_main=False, structs=loaded.structs)
         self.compiler.compile()
         self.facts = self.compiler.facts
         self.graph = self.compiler.call_graph()

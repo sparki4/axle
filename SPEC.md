@@ -146,3 +146,17 @@ The compiler is a handwritten recursive-descent/precedence parser, followed by a
 `str` is an immutable UTF-8 string with value semantics: `let b = a;` copies, there is no sharing. Literals use `"..."` with the escapes `\n \t \r \0 \\ \"`. `+` concatenates and, like every allocation, requires `![mem]`; so do `str_slice`, `str_upper`, `str_lower`, `str_trim` and the `str_from_*` builtins. String literals count as allocations for `noalloc`. Comparisons `== != < > <= >=` are lexicographic by bytes. Lengths and indices are in bytes: `str_slice` aborts on a range outside the string or inside a multi-byte character, and `str_byte` aborts past the end. `str_parse_i64` and `str_parse_f64` take a default and never abort. `arg_str(i)` reads a command-line argument (`![io, mem]`).
 
 In `extern "c"` signatures a string is written `c_str`, meaning `const char *`: the argument is copied into a NUL-terminated buffer (an embedded NUL aborts), and a returned pointer is copied immediately and never freed (NULL aborts). Plain `str` in an `extern "c"` signature is an error.
+
+## struct
+
+```
+struct Point { x: i64, y: f64 }
+struct Person { name: str, home: Point }
+let p = Point { x: 1, y: 2.5 };
+var q = p;          // a copy: structs have value semantics
+q.x = 9;            // field assignment, also nested: who.home.y = 1.0;
+```
+
+Fields hold `i64`, `u64`, `f64`, `bool`, `str` or another struct; not buffers, pointers or `unit`. A struct cannot contain itself. A literal names every field exactly once. `==` and `!=` compare all fields; ordering operators are not defined. `print` does not accept structs. Structs may be passed to and returned from AXLE functions and bridge externs, never `extern "c"`. Copying a struct that contains a `str` allocates, so it counts against `noalloc`.
+
+Over a bridge a struct is sent as `r:` plus the hex of its UTF-8 JSON object (`{"name":"a","home":{"x":2,"y":0.5}}`). Python receives a dict and JavaScript an object, and must return one with exactly the declared field names and types (a number for an integer field must not have a fractional part). A wrong shape aborts with `expected a <Struct> object`. Non-finite `f64` values cannot be sent inside a struct.

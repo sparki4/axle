@@ -17,7 +17,7 @@ import axle
 def run(options):
     loaded = axle.load_program(options.source)
     compiler = axle.Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives,
-                             guarantees=loaded.guarantees, require_main=False, test_mode=True)
+                             guarantees=loaded.guarantees, require_main=False, test_mode=True, structs=loaded.structs)
     rust = compiler.compile()
     if not compiler.test_names:
         raise axle.Error('no tests found', hint='define tests as `fn test_name() -> unit ![effects] { assert(...); }`')

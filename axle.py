@@ -102,7 +102,7 @@ TYPE_IDIOMS = {'int': 'use `i64` (signed) or `u64` (unsigned)', 'long': 'use `i6
                'float': 'there are no floats yet', 'double': 'there are no floats yet', 'f32': 'there are no floats yet', 'f64': 'there are no floats yet',
                'string': 'there are no strings yet', 'str': 'there are no strings yet', 'void': 'use `unit`', 'boolean': 'use `bool`', 'char': 'use `u64`',
                'Vec': 'use `buf_u64`', 'Array': 'use `buf_u64`', 'list': 'use `buf_u64`'}
-CHAR_IDIOMS = {'.': 'AXLE has no ranges, fields or method calls; call functions as `f(x)`', '"': 'strings are only valid in import/extern/link/native declarations',
+CHAR_IDIOMS = {'.': 'AXLE has no ranges or method calls; use `while`, and call functions as `f(x)`; `p.field` reads a struct field', '"': 'strings are only valid in import/extern/link/native declarations',
                "'": 'there are no character literals; use a u64 number', '@': 'AXLE has no attributes or decorators',
                '#': 'comments start with `//`', '$': 'identifiers use letters, digits and `_`', '?': 'AXLE has no `?`; use `if`', '`': 'AXLE has no template strings'}
 COMPOUND = {'+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>='}
@@ -135,7 +135,7 @@ class Token:
     bad: bool = False
 
 def lex(source, source_name=None):
-    pattern = re.compile(r'\s+|//[^\n]*|"(?:[^"\\\n]|\\.)*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
+    pattern = re.compile(r'\s+|//[^\n]*|"(?:[^"\\\n]|\\.)*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^.\-]')
     tokens, pos, line, column = [], 0, 1, 1
     while pos < len(source):
         match = pattern.match(source, pos)
@@ -172,6 +172,7 @@ class Parser:
         self.tokens, self.i = lex(source, source_name), 0
         self.imports, self.externs, self.links, self.natives = [], [], [], []
         self.spans, self.guarantees = {}, {}
+        self.structs = []
     def peek(self):
         return self.tokens[self.i].value
     def pop(self):
@@ -201,6 +202,10 @@ class Parser:
         token = self.pop()
         if abi and not pointer and token.value in ABI_TYPES:
             return token.value
+        record = (not pointer and token.value not in TYPES and token.value not in TYPE_IDIOMS and token.value not in RESERVED
+                  and re.fullmatch('[A-Za-z_][A-Za-z_0-9]*', token.value))
+        if record:
+            return token.value      # a struct name; the compiler checks that it exists
         if token.value not in TYPES or (pointer and token.value not in {'i64', 'u64', 'bool'}):
             raise Error('expected a value type or pointer to a scalar', token, hint=TYPE_IDIOMS.get(token.value))
         return ('*' if pointer else '') + token.value
@@ -253,6 +258,20 @@ class Parser:
                     raise Error('import requires a quoted .axl path using forward slashes', path)
                 self.need(';')
                 self.imports.append(path)
+                continue
+            if self.peek() == 'struct':
+                self.pop()
+                name = self.name()
+                self.need('{')
+                fields = []
+                while self.peek() != '}':
+                    field = self.name()
+                    self.need(':')
+                    fields.append((field, self.type()))
+                    if not self.take(','): break
+                self.need('}')
+                if not fields: raise Error('a struct needs at least one field', name)
+                self.structs.append((name, fields))
                 continue
             if self.take('link'):
                 token, library = self.quoted('library name')
@@ -369,10 +388,25 @@ class Parser:
                         if not self.take(','): break
                 self.need(')')
                 left = ('call', token, args)
+            elif (self.peek() == '{' and self.tokens[self.i + 1].value != '}' and re.fullmatch('[A-Za-z_][A-Za-z_0-9]*', self.tokens[self.i + 1].value)
+                  and self.tokens[self.i + 2].value == ':'):
+                self.pop()
+                values = []
+                while True:
+                    field = self.name()
+                    self.need(':')
+                    values.append((field, self.expr()))
+                    if not self.take(','): break
+                    if self.peek() == '}': break
+                self.need('}')
+                left = ('record', token, values)
             else:
                 left = ('name', token)
         else:
             raise Error('expected expression', token)
+        while self.peek() == '.':
+            dot = self.pop()
+            left = ('field', dot, left, self.name())
         while self.PRECEDENCE.get(self.peek(), -1) >= minimum:
             op = self.pop()
             left = ('binary', op, left, self.expr(self.PRECEDENCE[op.value] + 1))
@@ -381,7 +415,7 @@ class Parser:
 FLOAT = r'[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+[eE][+-]?[0-9]+(?:f64)?|[0-9]+f64'
 
 def rust_type(typ):
-    return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else 'String' if typ == 'str' else typ
+    return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else 'String' if typ == 'str' else typ if typ in TYPES else 'S_' + typ
 
 def check_edition(parser):
     if parser.edition is not None and parser.edition != EDITION:
@@ -397,7 +431,8 @@ def rust_literal(text):
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 class Compiler:
-    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=(), guarantees=None, require_main=True, test_mode=False):
+    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=(), guarantees=None, require_main=True, test_mode=False, structs=()):
+        self.structs_raw = list(structs)
         self.foreign_commands = foreign_commands or {}
         self.test_mode = test_mode
         self.guarantees = dict(guarantees or {})
@@ -407,6 +442,7 @@ class Compiler:
         if functions is None:
             parser = Parser(source)
             self.functions = parser.program()
+            self.structs_raw += parser.structs
             check_edition(parser)
             externs += parser.externs
             self.guarantees.update(parser.guarantees)
@@ -417,7 +453,24 @@ class Compiler:
             self.functions = functions
         self.signatures = {}
         self.externs = {}
+        self.structs = {}
+        for name, fields in self.structs_raw:
+            if name.value in self.structs or name.value in TYPES or name.value in ABI_TYPES:
+                raise Error('duplicate or reserved struct name', name)
+            self.structs[name.value] = fields
+        for name, fields in self.structs_raw:
+            seen = set()
+            for field, typ in fields:
+                if field.value in seen: raise Error('duplicate field ' + field.value, field)
+                seen.add(field.value)
+                if typ in {'unit', 'buf_u64'} or typ.startswith('*') or typ in ABI_TYPES:
+                    raise Error(f'a struct field cannot have type {typ}', field, hint='fields hold i64, u64, f64, bool, str or another struct; buffers are shared handles and would break value semantics')
+                self.check_type(typ, field)
+        for name, fields in self.structs_raw:
+            self.check_cycle(name.value, name, [])
         for name, params, result, effects, body in self.functions:
+            for param, typ in params: self.check_type(typ, param)
+            self.check_type(result, name)
             if name.value in self.signatures or name.value in BUILTINS:
                 raise Error('duplicate or reserved function name', name)
             self.signatures[name.value] = ([t for _, t in params], result, effects)
@@ -426,10 +479,15 @@ class Compiler:
                 raise Error('duplicate or reserved function name', name)
             lang = kind.split(':', 1)[0]
             for param, typ in params:
+                self.check_type(typ, param)
+                if (typ in self.structs) and lang == 'c':
+                    raise Error('extern "c" cannot take a struct', param, hint='pass its fields as separate scalar arguments')
                 if typ == 'str' and lang == 'c':
                     raise Error('extern "c" cannot take str directly', param, hint='declare the parameter as c_str (a NUL-terminated const char*)')
                 if typ in {'unit', 'buf_u64'} or (lang != 'c' and typ.startswith('*')):
                     raise Error(f'extern parameter type {typ} is not supported for {lang!r} externs', param)
+            self.check_type(result, name)
+            if result in self.structs and lang == 'c': raise Error('extern "c" cannot return a struct', name, hint='return its fields through separate calls')
             if result == 'buf_u64' or (lang != 'c' and result.startswith('*')):
                 raise Error(f'extern result type {result} is not supported for {lang!r} externs', name)
             seen = set()
@@ -448,6 +506,17 @@ class Compiler:
             raise Error('program requires fn main() -> unit')
         self.test_names = sorted(n for n, (p, r, e) in self.signatures.items()
                                  if n.startswith('test_') and not p and r == 'unit' and n not in self.externs)
+    def check_type(self, typ, token):
+        if typ in TYPES or typ in ABI_TYPES or typ.startswith('*') or typ in self.structs: return
+        close = did_you_mean(typ, set(self.structs) | TYPES)
+        raise Error('unknown type ' + typ, token, hint=f'did you mean `{close}`?' if close else 'declare it with `struct Name { field: type }`', suggestion=close)
+    def check_cycle(self, name, token, path):
+        if name in path:
+            raise Error('struct ' + name + ' contains itself', token, hint='a struct cannot hold itself directly; there are no references or recursive types yet')
+        for _, typ in self.structs[name]:
+            if typ in self.structs: self.check_cycle(typ, token, path + [name])
+    def has_text(self, typ):
+        return typ == 'str' or (typ in getattr(self, 'structs', {}) and any(self.has_text(t) for _, t in self.structs[typ]))
     def note(self, kind, token, **detail):
         """Record one footprint fact: something this source position can do."""
         if self.current is not None:
@@ -484,6 +553,36 @@ class Compiler:
             if number > (2**64 - 1 if typ == 'u64' else 2**63 - 1):
                 raise Error('integer literal out of range', token)
             return typ, str(number) + typ
+        if kind == 'record':
+            fields = self.structs.get(value)
+            if fields is None:
+                close = did_you_mean(value, set(self.structs))
+                raise Error('unknown struct ' + value, token, hint=f'did you mean `{close}`?' if close else 'declare it with `struct Name { field: type }`', suggestion=close)
+            given = {}
+            for field, expr in rest[0]:
+                if field.value in given: raise Error('field ' + field.value + ' given twice', field)
+                given[field.value] = (field, self.expression(expr))
+            parts = []
+            for field, typ in fields:
+                if field.value not in given: raise Error(f'missing field {field.value} in {value}', token, hint='every field must be given')
+                supplied, (actual, code) = given.pop(field.value)
+                self.require(actual, typ, supplied)
+                parts.append(f'f_{field.value}: {code}')
+            if given:
+                extra = next(iter(given.values()))[0]
+                raise Error(f'{value} has no field {extra.value}', extra, hint='fields: ' + ', '.join(f.value for f, _ in fields))
+            return value, f'S_{value} {{ ' + ', '.join(parts) + ' }'
+        if kind == 'field':
+            typ, code = self.expression(rest[0])
+            fields = self.structs.get(typ)
+            if fields is None: raise Error(f'{typ} has no fields', token, hint='only structs have fields')
+            names = {f.value: t for f, t in fields}
+            if rest[1].value not in names:
+                close = did_you_mean(rest[1].value, set(names))
+                raise Error(f'{typ} has no field {rest[1].value}', rest[1], hint=f'did you mean `{close}`?' if close else 'fields: ' + ', '.join(names), suggestion=close)
+            field_type = names[rest[1].value]
+            if self.has_text(field_type): self.note('alloc', token, what='copy of a string field', via='.' + rest[1].value)
+            return field_type, f'({code}).f_{rest[1].value}' + ('.clone()' if field_type in self.structs or field_type == 'str' else '')
         if kind == 'bool': return 'bool', value
         if kind == 'string':
             out, i = [], 1
@@ -502,7 +601,10 @@ class Compiler:
         if kind == 'name':
             typ, mutable = self.lookup(token)
             code = 'v_' + value
-            return typ, code + '.clone()' if typ in {'buf_u64', 'str'} else code
+            if typ == 'buf_u64' or typ in self.structs or typ == 'str':
+                if self.has_text(typ): self.note('alloc', token, what='copy of a string', via=f'use of `{value}`')
+                return typ, code + '.clone()'
+            return typ, code
         if kind == 'unary':
             if value == '-' and rest[0][0] == 'number' and rest[0][1].value in {'9223372036854775808', '9223372036854775808i64'}:
                 return 'i64', 'i64::MIN'
@@ -700,14 +802,29 @@ class Compiler:
                 lines.append(f'let {"mut " if mutable else ""}v_{name.value}: {rust_type(typ)} = {code};')
             elif kind == 'assign':
                 target, rhs = rest
-                if target[0] != 'name': raise Error('assignment target must be a variable', token)
-                typ, mutable = self.lookup(target[1])
+                path = []
+                root = target
+                while root[0] == 'field':
+                    path.insert(0, root[3])
+                    root = root[2]
+                if root[0] != 'name': raise Error('assignment target must be a variable or a field of one', token)
+                typ, mutable = self.lookup(root[1])
                 if not mutable: raise Error('cannot assign to immutable variable', token)
+                place = 'v_' + root[1].value
+                for field in path:
+                    fields = self.structs.get(typ)
+                    if fields is None: raise Error(f'{typ} has no fields', field)
+                    names = {f.value: t for f, t in fields}
+                    if field.value not in names:
+                        close = did_you_mean(field.value, set(names))
+                        raise Error(f'{typ} has no field {field.value}', field, hint=f'did you mean `{close}`?' if close else 'fields: ' + ', '.join(names), suggestion=close)
+                    typ = names[field.value]
+                    place += '.f_' + field.value
                 actual, code = self.expression(rhs)
                 self.require(actual, typ, token)
-                self.note('assign', token, target=target[1].value, what=f'assigns local variable `{target[1].value}` (not visible outside this function)')
+                self.note('assign', token, target=root[1].value, what=f'assigns local variable `{root[1].value}` (not visible outside this function)')
                 self.alias_note(rhs, actual, token)
-                lines.append('v_' + target[1].value + ' = ' + code + ';')
+                lines.append(place + ' = ' + code + ';')
             elif kind == 'return':
                 typ, code = ('unit', '()') if rest[0] is None else self.expression(rest[0])
                 self.require(typ, self.result, token)
@@ -747,6 +864,24 @@ class Compiler:
                     returned = ended = True      # diverges: no value has to be invented after it
         self.scopes.pop()
         return '\n'.join(lines), returned, ended
+    def json_impl(self, name, fields):
+        encode, decode = [], []
+        for f, t in fields:
+            n = f.value
+            if t in {'i64', 'u64', 'bool'}: value = f'self.f_{n}.to_string()'
+            elif t == 'f64': value = f'axle_json_f64(self.f_{n})'
+            elif t == 'str': value = f'axle_json_str(&self.f_{n})'
+            else: value = f'self.f_{n}.to_json()'
+            encode.append(f'parts.push(format!("\\"{n}\\":{{}}", {value}));')
+            if t in {'i64', 'u64'}: got = f'match axle_json_get(object, "{n}")? {{ AxleJson::Num(text) => text.parse::<{t}>().ok()?, _ => return None }}'
+            elif t == 'f64': got = f'match axle_json_get(object, "{n}")? {{ AxleJson::Num(text) => text.parse::<f64>().ok()?, _ => return None }}'
+            elif t == 'bool': got = f'match axle_json_get(object, "{n}")? {{ AxleJson::Bool(b) => *b, _ => return None }}'
+            elif t == 'str': got = f'match axle_json_get(object, "{n}")? {{ AxleJson::Str(text) => text.clone(), _ => return None }}'
+            else: got = f'S_{t}::from_json(axle_json_get(object, "{n}")?)?'
+            decode.append(f'f_{n}: {got}')
+        return (f'impl S_{name} {{\n'
+                f'    fn to_json(&self) -> String {{ let mut parts: Vec<String> = Vec::new(); {" ".join(encode)} format!("{{{{{{}}}}}}", parts.join(",")) }}\n'
+                f'    fn from_json(json: &AxleJson) -> Option<Self> {{ let object = match json {{ AxleJson::Obj(fields) => fields, _ => return None }}; Some(S_{name} {{ {", ".join(decode)} }}) }}\n}}')
     def extern_wrapper(self, name, kind_token, kind, params, result, symbol):
         visible = lambda t: ABI_VISIBLE.get(t, t)
         arguments = ', '.join(f'v_{p.value}: {rust_type(visible(t))}' for p, t in params)
@@ -783,11 +918,14 @@ class Compiler:
         else:
             target = spec
         root_dir = str((base / root).resolve()) if root else (str(pathlib.Path(target).parent) if spec.endswith(suffixes) else str(base))
-        values = ', '.join(f'format!("{{:?}}", v_{p.value})' if t == 'f64' else f'axle_hex_arg(&v_{p.value})' if t == 'str' else f'v_{p.value}.to_string()' for p, t in params)
+        values = ', '.join(f'format!("{{:?}}", v_{p.value})' if t == 'f64' else f'axle_hex_arg(&v_{p.value})' if t == 'str' else f'axle_rec_arg(&v_{p.value}.to_json())' if t in self.structs else f'v_{p.value}.to_string()' for p, t in params)
         call = f'axle_bridge_call({rust_literal(lang)}, {rust_literal(target)}, {rust_literal(root_dir)}, {rust_literal(symbol)}, &[{values}])'
         if result == 'unit': tail = f'let _ = {call};'
         elif result == 'bool':
             tail = f'let reply = {call};\nmatch reply.as_str() {{ "true" => true, "false" => false, _ => axle_bridge_fail({rust_literal(symbol)}, "expected a bool result, got", &reply) }}'
+        elif result in self.structs:
+            tail = (f'let reply = {call};\naxle_rec_decode(&reply).and_then(|text| axle_json_parse(&text)).and_then(|json| S_{result}::from_json(&json))'
+                    f'.unwrap_or_else(|| axle_bridge_fail({rust_literal(symbol)}, "expected a {result} object, got", &reply))')
         elif result == 'str':
             tail = f'let reply = {call};\naxle_hex_decode(&reply).unwrap_or_else(|| axle_bridge_fail({rust_literal(symbol)}, "expected a str result, got", &reply))'
         else:
@@ -841,7 +979,7 @@ class Compiler:
                                 hint=f'remove `{guarantee}` from fn {name}, or remove the operation named above')
     def compile(self):
         chunks = ['// Generated by AXLE ' + VERSION,
-                  '#![allow(unused_parens, unused_mut, dead_code, unused_variables, clashing_extern_declarations)]',
+                  '#![allow(unused_parens, unused_mut, dead_code, non_camel_case_types, unused_variables, clashing_extern_declarations)]',
                   'type AxleBuffer = std::rc::Rc<std::cell::RefCell<Vec<u64>>>;',
                   'fn axle_buf_new(count: u64) -> AxleBuffer { std::rc::Rc::new(std::cell::RefCell::new(vec![0; usize::try_from(count).expect("buffer too large")])) }',
                   'fn axle_buf_iota(count: u64) -> AxleBuffer { let _ = usize::try_from(count).expect("buffer too large"); std::rc::Rc::new(std::cell::RefCell::new((0..count).collect())) }',
@@ -855,6 +993,11 @@ class Compiler:
                   'unsafe fn axle_free(pointer: *mut u64, count: u64) { std::alloc::dealloc(pointer.cast::<u8>(), axle_layout(count)); }']
         if any(kind != 'c' for _, kind, *_ in self.externs.values()):
             chunks.append(bridge_runtime.rust_runtime())
+        for sname, fields in self.structs.items():
+            body = ', '.join(f'f_{f.value}: {rust_type(t)}' for f, t in fields)
+            chunks.append(f'#[derive(Clone, Debug, PartialEq)]\nstruct S_{sname} {{ {body} }}')
+            if any(kind != 'c' for _, kind, *_ in self.externs.values()):
+                chunks.append(self.json_impl(sname, fields))
         for name, (kind_token, kind, params, result, symbol) in self.externs.items():
             chunks.append(self.extern_wrapper(name, kind_token, kind, params, result, symbol))
         for name, params, result, effects, statements in self.functions:
@@ -885,6 +1028,7 @@ class Loaded:
     def __init__(self):
         self.functions, self.externs, self.links, self.natives, self.modules = [], [], [], [], []
         self.guarantees, self.spans, self.import_edges = {}, {}, []
+        self.structs = []
 
 def load_program(path, *, import_base=None):
     """Resolve relative imports once; imported names share one global namespace."""
@@ -915,6 +1059,7 @@ def load_program(path, *, import_base=None):
             if not native.is_file(): raise Error('native file not found: ' + relative, token)
             loaded.natives.append(str(native))
         loaded.functions.extend(own_functions)
+        loaded.structs.extend(parser.structs)
         loaded.externs.extend(parser.externs)
         loaded.guarantees.update(parser.guarantees)
         loaded.spans.update(parser.spans)
@@ -928,12 +1073,12 @@ def load_program(path, *, import_base=None):
 def compile_file(path, *, foreign_commands=None, import_base=None, require_main=True):
     loaded = load_program(path, import_base=import_base)
     return Compiler(functions=loaded.functions, foreign_commands=foreign_commands, externs=loaded.externs,
-                    links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=require_main).compile()
+                    links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=require_main, structs=loaded.structs).compile()
 
 def api_report(path):
     """Machine-readable summary of a program's callable surface, for tools and agents."""
     loaded = load_program(path)
-    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=False).compile()
+    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=False, structs=loaded.structs).compile()
     def params(items): return [{'name': p.value, 'type': t} for p, t in items]
     functions = [{'name': n.value, 'kind': 'fn', 'params': params(p), 'result': r, 'effects': sorted(e),
                   'file': n.source, 'line': n.line} for n, p, r, e, _ in loaded.functions]

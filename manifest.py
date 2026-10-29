@@ -87,10 +87,10 @@ SEMANTICS = [
     '`+ - *` and unary `-` wrap on overflow. `/` truncates toward zero; `/` and `%` abort when the divisor is zero. Shift counts use the low six bits.',
     'Parameters are immutable. `let` bindings cannot be reassigned; `var` bindings can. There are no globals.',
     'Every function declares its return type. Effects (`![io, mem]`) must include every effect of everything it calls.',
-    'There are no exceptions, null, floats, strings, structs or classes yet. A failure aborts the program: use `assert(...)` or `abort()`, never a made-up value.',
+    'There are no exceptions, null, classes, methods or generics. `f64` follows IEEE 754 and never aborts; `str` is an immutable UTF-8 value; `struct Name { field: type }` is a value type (copying a binding copies the data). A failure aborts the program: use `assert(...)` or `abort()`, never a made-up value.',
     'Control flow: `if` / `else if` / `else`, `while`, `break`, `continue`, `return`. There is no `for`.',
     'A buffer name copied into another binding shares storage with the original.',
-    '`extern "c"` calls need `unsafe`. `extern "py:..."` / `extern "js:..."` carry i64, u64, bool and unit.',
+    '`extern "c"` calls need `unsafe`. `extern "py:..."` / `extern "js:..."` carry i64, u64, f64, str, bool and unit; bridges also carry structs as dicts/objects; C strings are `c_str`.',
     '`nothrow` and `noalloc` after the effect list are proven over the call graph or the build fails.',
     '`///` comments above a function and `//!` comments at the top of a file are documentation that `axle map`, `slice` and `audit` surface; a line `/// why: ...` records the reason.',
 ]

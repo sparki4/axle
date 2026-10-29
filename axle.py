@@ -13,9 +13,17 @@ import tempfile
 from dataclasses import dataclass
 
 import bridge_runtime
+import runtime_rs
 
 VERSION = '0.3.0'
-TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64'}
+TASK_RESULTS = ('i64', 'u64', 'bool', 'f64', 'str', 'unit')
+TASK_TYPES = {'task_' + t for t in TASK_RESULTS}
+TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64', 'f64', 'str', 'chan_u64'} | TASK_TYPES
+POINTEES = {'i64', 'u64', 'bool', 'f64'}
+SENDABLE = {'i64', 'u64', 'bool', 'f64', 'str', 'chan_u64'}   # values that may cross a thread boundary
+CLONED = {'buf_u64', 'str', 'chan_u64'} | TASK_TYPES          # handle types: reading a name copies the handle
+NOT_COMPARABLE = {'unit', 'buf_u64', 'chan_u64'} | TASK_TYPES
+FLOAT_OPS = {'+', '-', '*', '/', '%', '<', '>', '<=', '>='}
 
 # Stable diagnostic codes and generic repair hints, matched against the message.
 DIAGNOSTICS = [
@@ -64,7 +72,7 @@ class Token:
     source: str | None = None
 
 def lex(source, source_name=None):
-    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
+    pattern = re.compile(r'\s+|//[^\n]*|"(?:[^"\\\n]|\\.)*"|[0-9]+\.[0-9]+(?:[eE][+-]?[0-9]+)?(?:f64)?|[0-9]+(?:[eE][+-]?[0-9]+)?f64|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
     tokens, pos, line, column = [], 0, 1, 1
     while pos < len(source):
         match = pattern.match(source, pos)
@@ -83,17 +91,86 @@ def lex(source, source_name=None):
     return tokens
 
 ABI_TYPES = {'c_int': 'std::ffi::c_int', 'c_uint': 'std::ffi::c_uint', 'c_long': 'std::ffi::c_long',
-             'c_ulong': 'std::ffi::c_ulong', 'c_size': 'usize'}
-ABI_VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
+             'c_ulong': 'std::ffi::c_ulong', 'c_size': 'usize', 'c_float': 'f32'}
+ABI_VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64', 'c_float': 'f64'}
 RESERVED = TYPES | set(ABI_TYPES) | {'import', 'fn', 'let', 'var', 'return', 'if', 'else', 'while', 'unsafe', 'true', 'false',
-                                     'io', 'mem', 'extern', 'link', 'native', 'break', 'continue'}
-BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'offset',
-            'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec'}
+                                     'io', 'mem', 'conc', 'extern', 'link', 'native', 'break', 'continue'}
+# name: (parameter types, result, required effects, Rust template with $0.. placeholders, facts recorded)
+ALLOCS = (('alloc', 'new string'),)
+SIMPLE = {
+    'f64_from_i64': (['i64'], 'f64', (), '(($0) as f64)', ()),
+    'f64_from_u64': (['u64'], 'f64', (), '(($0) as f64)', ()),
+    'f64_to_i64': (['f64'], 'i64', (), '(($0) as i64)', ()),
+    'f64_to_u64': (['f64'], 'u64', (), '(($0) as u64)', ()),
+    'f64_to_bits': (['f64'], 'u64', (), '($0).to_bits()', ()),
+    'f64_from_bits': (['u64'], 'f64', (), 'f64::from_bits($0)', ()),
+    'f64_is_nan': (['f64'], 'bool', (), '($0).is_nan()', ()),
+    'f64_pow': (['f64', 'f64'], 'f64', (), '($0).powf($1)', ()),
+    'str_len': (['str'], 'u64', (), '(($0).len() as u64)', ()),
+    'str_concat': (['str', 'str'], 'str', ('mem',), 'AxleStr::from_string(format!("{}{}", $0, $1))', ALLOCS),
+    'str_from_i64': (['i64'], 'str', ('mem',), 'AxleStr::from_string(($0).to_string())', ALLOCS),
+    'str_from_u64': (['u64'], 'str', ('mem',), 'AxleStr::from_string(($0).to_string())', ALLOCS),
+    'str_from_bool': (['bool'], 'str', ('mem',), 'AxleStr::from_string(($0).to_string())', ALLOCS),
+    'str_from_f64': (['f64'], 'str', ('mem',), 'AxleStr::from_string(format!("{:?}", $0))', ALLOCS),
+    'str_byte': (['str', 'u64'], 'u64', (), 'axle_str_byte($0, $1)', (('abort', 'index out of bounds'),)),
+    'str_slice': (['str', 'u64', 'u64'], 'str', ('mem',), 'axle_str_slice($0, $1, $2)',
+                  ALLOCS + (('abort', 'range out of bounds or not on a UTF-8 boundary'),)),
+    'str_find': (['str', 'str'], 'i64', (), 'axle_str_find($0, $1)', ()),
+    'str_contains': (['str', 'str'], 'bool', (), '($0).contains(&*$1)', ()),
+    'str_starts_with': (['str', 'str'], 'bool', (), '($0).starts_with(&*$1)', ()),
+    'str_parse_i64': (['str', 'i64'], 'i64', (), '($0).trim().parse::<i64>().unwrap_or($1)', ()),
+    'str_parse_u64': (['str', 'u64'], 'u64', (), '($0).trim().parse::<u64>().unwrap_or($1)', ()),
+    'str_parse_f64': (['str', 'f64'], 'f64', (), '($0).trim().parse::<f64>().unwrap_or($1)', ()),
+    'chan_new': ([], 'chan_u64', ('conc',), 'axle_chan_new()', (('alloc', 'channel'),)),
+    'chan_send': (['chan_u64', 'u64'], 'unit', ('conc',), 'axle_chan_send($0, $1)',
+                  (('concurrency', 'send'), ('abort', 'send on a closed channel'))),
+    'chan_recv': (['chan_u64', 'u64'], 'u64', ('conc',), 'axle_chan_recv($0, $1)',
+                  (('concurrency', 'recv: blocks until a value arrives or the channel is closed and empty'),)),
+    'chan_close': (['chan_u64'], 'unit', ('conc',), 'axle_chan_close($0)', (('concurrency', 'close'),)),
+}
+for _name in ('sqrt', 'floor', 'ceil', 'abs', 'sin', 'cos', 'ln', 'exp'):
+    SIMPLE['f64_' + _name] = (['f64'], 'f64', (), '($0).' + {'ln': 'ln', 'abs': 'abs'}.get(_name, _name) + '()', ())
+BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'alloc_f64', 'free_f64', 'offset',
+            'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec',
+            'spawn', 'join'} | set(SIMPLE)
+
+def decode_string(token):
+    body, out, i = token.value[1:-1], [], 0
+    simple = {'n': '\n', 't': '\t', 'r': '\r', '0': '\0', '\\': '\\', '"': '"'}
+    while i < len(body):
+        ch = body[i]
+        if ch != '\\':
+            out.append(ch)
+            i += 1
+            continue
+        i += 1
+        if i < len(body) and body[i] in simple:
+            out.append(simple[body[i]])
+            i += 1
+        elif body[i:i + 2] == 'u{' and '}' in body[i:]:
+            end = body.index('}', i)
+            try:
+                out.append(chr(int(body[i + 2:end], 16)))
+            except (ValueError, OverflowError):
+                raise Error('invalid \\u{...} escape in string literal', token) from None
+            i = end + 1
+        else:
+            raise Error('unknown escape in string literal (use \\n \\t \\r \\0 \\\\ \\" or \\u{hex})', token)
+    return ''.join(out)
+
+def rust_string(text):
+    out = []
+    for ch in text:
+        if ch == '"' or ch == '\\': out.append('\\' + ch)
+        elif 32 <= ord(ch) < 127: out.append(ch)
+        else: out.append('\\u{%x}' % ord(ch))
+    return '"' + ''.join(out) + '"'
+
 
 class Parser:
     def __init__(self, source, source_name=None):
         self.tokens, self.i = lex(source, source_name), 0
-        self.imports, self.externs, self.links, self.natives = [], [], [], []
+        self.imports, self.externs, self.links, self.natives, self.spans = [], [], [], [], {}
     def peek(self):
         return self.tokens[self.i].value
     def pop(self):
@@ -121,7 +198,7 @@ class Parser:
         token = self.pop()
         if abi and not pointer and token.value in ABI_TYPES:
             return token.value
-        if token.value not in TYPES or (pointer and token.value not in {'i64', 'u64', 'bool'}):
+        if token.value not in TYPES or (pointer and token.value not in POINTEES):
             raise Error('expected a value type or pointer to a scalar', token)
         return ('*' if pointer else '') + token.value
     def header(self, abi=False):
@@ -143,8 +220,8 @@ class Parser:
             if self.peek() != ']':
                 while True:
                     effect = self.pop()
-                    if effect.value not in {'io', 'mem'} or effect.value in effects:
-                        raise Error('expected a unique io or mem effect', effect)
+                    if effect.value not in {'io', 'mem', 'conc'} or effect.value in effects:
+                        raise Error('expected a unique io, mem or conc effect', effect)
                     effects.add(effect.value)
                     if not self.take(','): break
             self.need(']')
@@ -181,9 +258,12 @@ class Parser:
             if self.take('extern'):
                 self.externs.append(self.extern())
                 continue
+            start = self.tokens[self.i]
             self.need('fn')
             name, params, result, effects = self.header()
-            functions.append((name, params, result, effects, self.block()))
+            body = self.block()
+            self.spans[name.value] = (name.source, start.line, self.tokens[self.i - 1].line)
+            functions.append((name, params, result, effects, body))
         return functions
     def extern(self):
         kind_token, kind = self.quoted('foreign kind')
@@ -197,6 +277,7 @@ class Parser:
             if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', symbol):
                 raise Error('foreign name must be an identifier', name)
         self.need(';')
+        self.spans[name.value] = (name.source, kind_token.line, self.tokens[self.i - 1].line)
         return (kind_token, kind, name, params, result, effects, symbol)
     def block(self):
         self.need('{')
@@ -252,6 +333,10 @@ class Parser:
             self.need(')')
         elif re.fullmatch(r'[0-9]+(?:u64|i64)?', token.value):
             left = ('number', token)
+        elif re.fullmatch(r'[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?(?:f64)?', token.value):
+            left = ('float', token)
+        elif token.value.startswith('"'):
+            left = ('string', token)
         elif token.value in {'true', 'false'}:
             left = ('bool', token)
         elif re.fullmatch('[A-Za-z_][A-Za-z_0-9]*', token.value) and token.value not in RESERVED:
@@ -273,7 +358,9 @@ class Parser:
         return left
 
 def rust_type(typ):
-    return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else typ
+    if typ.startswith('*'): return '*mut ' + typ[1:]
+    if typ.startswith('task_'): return 'AxleTask<' + rust_type(typ[5:]) + '>'
+    return {'unit': '()', 'buf_u64': 'AxleBuffer', 'str': 'AxleStr', 'chan_u64': 'AxleChan'}.get(typ, typ)
 
 class RustSource(str):
     """Generated Rust text that also remembers what the final link needs."""

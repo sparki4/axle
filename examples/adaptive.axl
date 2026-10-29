@@ -1,0 +1,10 @@
+import "lib/math.axl";
+
+// High-level checked storage; no unsafe block or manual release.
+fn main() -> unit ![mem, io] {
+    let data = buf_iota(1000u64);
+    let alias = data;
+    buf_set(alias, 0u64, twice(21u64));
+    assert(buf_get(data, 0u64) == 42u64);
+    print(buf_sum(data));
+}

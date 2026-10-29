@@ -1,0 +1,14 @@
+// First command-line argument controls work; no compile-time constant workload.
+fn mix(n: u64) -> u64 {
+    var i: u64 = 0u64;
+    var state: u64 = 1u64;
+    while i < n {
+        state = (state ^ i) * 6364136223846793005u64 + 1442695040888963407u64;
+        i = i + 1u64;
+    }
+    return state;
+}
+
+fn main() -> unit ![io] {
+    print(mix(arg_u64(1u64)));
+}

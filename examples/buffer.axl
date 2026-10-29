@@ -1,0 +1,28 @@
+// Dynamic contiguous memory, explicit allocation and release, no garbage collector.
+fn sum_buffer(data: *u64, count: u64) -> u64 ![mem] {
+    var i: u64 = 0u64;
+    var total: u64 = 0u64;
+    unsafe {
+        while i < count {
+            total = total + load(offset(data, i));
+            i = i + 1u64;
+        }
+    }
+    return total;
+}
+
+fn main() -> unit ![mem, io] {
+    let count: u64 = 1000u64;
+    unsafe {
+        let data: *u64 = alloc_u64(count);
+        var i: u64 = 0u64;
+        while i < count {
+            store(offset(data, i), i);
+            i = i + 1u64;
+        }
+        let total: u64 = sum_buffer(data, count);
+        free_u64(data, count);
+        assert(total == 499500u64);
+        print(total);
+    }
+}

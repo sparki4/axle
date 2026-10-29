@@ -1,0 +1,10 @@
+print("Python host")
+
+js<<<END_JS
+console.log("JavaScript guest");
+rust<<<END_RUST
+println!("Rust inside JavaScript inside Python");
+END_RUST
+END_JS
+
+print("Back in Python")

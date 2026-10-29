@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.exe
+*.bin
+*.pdb
+*.rs
+*.obj
+*.poly/
+*.poly-*/

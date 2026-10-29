@@ -1,0 +1,12 @@
+fn main() -> unit ![mem, io] {
+    let count = arg_u64(1u64);
+    let rounds = arg_u64(2u64);
+    let data = buf_iota(count);
+    var i = 0u64;
+    var total = 0u64;
+    while i < rounds {
+        total = total + buf_sum(black_box(data));
+        i = i + 1u64;
+    }
+    print(total);
+}

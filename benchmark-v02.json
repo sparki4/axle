@@ -1,0 +1,148 @@
+{
+  "axle_version": "0.2.0",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cpu": "Intel64 Family 6 Model 151 Stepping 2, GenuineIntel",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "samples": 9,
+  "workloads": {
+    "integer_recurrence": {
+      "arguments": [
+        50000000
+      ],
+      "result": "1405508810463098625",
+      "median_ms": {
+        "axle_release": 61.4934000041103,
+        "rust_release": 61.30529999791179,
+        "axle_native": 60.907399994903244,
+        "rust_native": 60.804500011727214
+      },
+      "axle_over_rust": {
+        "release": 1.0030682503177526,
+        "native": 1.0016923086803804
+      },
+      "all_samples_ms": {
+        "axle_release": [
+          59.77010000788141,
+          62.33260000590235,
+          69.56110001192428,
+          60.54479999875184,
+          62.22989999514539,
+          61.5980999864405,
+          61.4934000041103,
+          60.36959998891689,
+          58.86240000836551
+        ],
+        "rust_release": [
+          60.92849999549799,
+          60.616899994784035,
+          59.80909999925643,
+          62.06999999994878,
+          67.30950000928715,
+          59.160599994356744,
+          61.83559999044519,
+          61.48040000698529,
+          61.30529999791179
+        ],
+        "axle_native": [
+          59.68230000871699,
+          60.909699997864664,
+          59.599900007015094,
+          59.221800009254366,
+          64.06309999874793,
+          61.37060000037309,
+          62.16459999268409,
+          60.416199994506314,
+          60.907399994903244
+        ],
+        "rust_native": [
+          61.10380000609439,
+          60.91559999913443,
+          59.98580000596121,
+          60.5690000083996,
+          73.0904000083683,
+          60.30789999931585,
+          60.804500011727214,
+          61.08519999543205,
+          59.82090000179596
+        ]
+      },
+      "build_seconds": {
+        "axle_release": 0.2416436000057729,
+        "rust_release": 0.21763020000071265,
+        "axle_native": 1.319092299992917,
+        "rust_native": 1.2822375999967335
+      }
+    },
+    "buffer_reduction": {
+      "arguments": [
+        4000000,
+        32
+      ],
+      "result": "255999936000000",
+      "median_ms": {
+        "axle_release": 54.134100006194785,
+        "rust_release": 55.24059999152087,
+        "axle_native": 43.68889999750536,
+        "rust_native": 45.092500004102476
+      },
+      "axle_over_rust": {
+        "release": 0.9799694430274848,
+        "native": 0.9688728722854262
+      },
+      "all_samples_ms": {
+        "axle_release": [
+          60.97839999711141,
+          59.430900000734255,
+          51.957799994852394,
+          53.600200000801124,
+          56.57279999286402,
+          54.134100006194785,
+          53.545199989457615,
+          54.16419998800848,
+          53.31210000440478
+        ],
+        "rust_release": [
+          72.52829999197274,
+          56.06270000862423,
+          53.79200000606943,
+          55.24059999152087,
+          53.221500013023615,
+          53.50939999334514,
+          60.18400000175461,
+          67.94630001240876,
+          54.44649999844842
+        ],
+        "axle_native": [
+          41.17430000042077,
+          50.36169999220874,
+          41.48799998802133,
+          41.0591999971075,
+          43.68889999750536,
+          43.824300009873696,
+          51.745700009632856,
+          52.13680000451859,
+          40.88100000808481
+        ],
+        "rust_native": [
+          45.092500004102476,
+          43.34839999501128,
+          45.068899999023415,
+          41.829199995845556,
+          45.117000001482666,
+          45.13649998989422,
+          45.21779999777209,
+          57.706299994606525,
+          43.16990000370424
+        ]
+      },
+      "build_seconds": {
+        "axle_release": 0.3051819999964209,
+        "rust_release": 0.2529857999907108,
+        "axle_native": 1.320436099995277,
+        "rust_native": 1.3278448000055505
+      }
+    }
+  },
+  "method": "Each profile uses the same rustc flags for AXLE and Rust. Randomized interleaving with fixed seed, one warmup, subprocess wall time including startup, allocation and output. black_box prevents repeated reductions from being hoisted. No general superiority claim.",
+  "semantics": "Integer workloads use identical wrapping arithmetic. The reduction Rust baseline uses an owned Vec; AXLE uses a shared Rc<RefCell<Vec>> buffer. No aliasing is exercised in this workload. AXLE pays for its additional shared-handle semantics."
+}

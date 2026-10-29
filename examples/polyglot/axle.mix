@@ -1,0 +1,5 @@
+fn main() -> unit ![io] {
+    print(42u64);
+    py { print("Python guest inside AXLE") }
+    js { console.log("JavaScript guest inside AXLE"); }
+}

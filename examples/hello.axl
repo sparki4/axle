@@ -1,0 +1,8 @@
+// A pure function needs no effect declaration.
+fn square(x: u64) -> u64 {
+    return x * x;
+}
+
+fn main() -> unit ![io] {
+    print(square(12u64));
+}

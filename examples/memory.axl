@@ -1,0 +1,15 @@
+fn increment(pointer: *u64) -> unit ![mem] {
+    unsafe {
+        store(pointer, load(pointer) + 1u64);
+    }
+}
+
+fn main() -> unit ![io, mem] {
+    var counter: u64 = 41u64;
+    unsafe {
+        let pointer: *u64 = addr(counter);
+        increment(pointer);
+    }
+    assert(counter == 42u64);
+    print(counter);
+}

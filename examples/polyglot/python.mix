@@ -1,0 +1,22 @@
+import os
+
+print("Python host")
+os.environ["AXLE_MESSAGE"] = "hello from Python"
+
+js {
+    console.log("JavaScript guest: " + process.env.AXLE_MESSAGE);
+}
+
+rust {
+    println!("Rust guest");
+}
+
+c {
+    printf("C guest\n");
+}
+
+cpp {
+    std::cout << "C++ guest" << std::endl;
+}
+
+print("Back in Python")

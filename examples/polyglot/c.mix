@@ -1,0 +1,9 @@
+#include <stdio.h>
+
+int main(void) {
+    printf("C host\n");
+    py { print("Python inside C") }
+    js { console.log("JavaScript inside C"); }
+    printf("Back in C\n");
+    return 0;
+}

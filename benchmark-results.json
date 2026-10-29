@@ -1,0 +1,39 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.14.6",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "iterations": 50000000,
+  "samples": 7,
+  "result": "1405508810463098625",
+  "frontend_ms": 0.6099000020185485,
+  "native_build_seconds": {
+    "axle": 0.24610459999530576,
+    "rust": 0.23698709999735001
+  },
+  "median_ms": {
+    "axle": 59.866299998247996,
+    "rust": 59.44979999912903
+  },
+  "axle_over_rust": 1.0070059108546214,
+  "all_samples_ms": {
+    "axle": [
+      60.278399992967024,
+      58.43069999536965,
+      59.67719999898691,
+      63.26179999450687,
+      58.39669999841135,
+      59.96850000519771,
+      59.866299998247996
+    ],
+    "rust": [
+      59.365100009017624,
+      59.08370000543073,
+      65.56560000171885,
+      59.44979999912903,
+      59.70160001015756,
+      64.75799999316223,
+      58.89780000143219
+    ]
+  },
+  "scope": "One integer recurrence workload. Wall clock includes process startup and printing. Same rustc flags. No general speed or compile-time claim."
+}

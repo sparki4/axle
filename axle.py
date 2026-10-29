@@ -43,6 +43,8 @@ F64_FUNCS = {
     'f64_is_nan': (['f64'], 'bool', '({0}).is_nan()'), 'f64_pow': (['f64', 'f64'], 'f64', '({0}).powf({1})'),
     'f64_to_bits': (['f64'], 'u64', '({0}).to_bits()'), 'f64_from_bits': (['u64'], 'f64', 'f64::from_bits({0})'),
 }
+F64_FUNCS['as_u64'] = (['i64'], 'u64', '(({0}) as u64)')       # wrapping reinterpretation, like the C cast
+F64_FUNCS['as_i64'] = (['u64'], 'i64', '(({0}) as i64)')
 for _n in ('sqrt', 'abs', 'floor', 'ceil', 'round', 'sin', 'cos', 'tan', 'exp', 'ln'):
     F64_FUNCS['f64_' + _n] = (['f64'], 'f64', '({0}).' + _n + '()')
 
@@ -525,9 +527,15 @@ class Compiler:
     def alias_note(self, node, typ, token):
         if node[0] == 'name' and typ == 'buf_u64':
             self.note('alias', token, name=node[1].value, what=f'second handle to the same shared buffer as `{node[1].value}`; writes through either are visible to both')
+    CONVERT = {('f64', 'i64'): 'f64_from_i64(x)', ('f64', 'u64'): 'f64_from_u64(x)', ('i64', 'f64'): 'f64_to_i64(x) (truncates toward zero)',
+               ('u64', 'f64'): 'f64_to_u64(x) (truncates, saturates)', ('u64', 'i64'): 'as_u64(x), or write the literal with a u64 suffix: 5u64',
+               ('i64', 'u64'): 'as_i64(x), or drop the suffix on a literal: 5', ('str', 'i64'): 'str_from_i64(x)', ('str', 'u64'): 'str_from_u64(x)',
+               ('str', 'f64'): 'str_from_f64(x)', ('i64', 'str'): 'str_parse_i64(s, default)', ('f64', 'str'): 'str_parse_f64(s, default)',
+               ('bool', 'i64'): 'compare instead: x != 0', ('bool', 'u64'): 'compare instead: x != 0u64'}
     def require(self, actual, expected, token):
         if actual != expected:
-            raise Error(f'expected {expected}, got {actual}', token)
+            how = self.CONVERT.get((expected, actual))
+            raise Error(f'expected {expected}, got {actual}', token, hint=f'AXLE never converts implicitly; convert with {how}' if how else None)
     def effect(self, effect, token):
         if effect not in self.effects:
             raise Error(f'function must declare {effect} effect', token,
@@ -1135,7 +1143,7 @@ def build(rust_source, output, profile='release', link_search=(), link_args=()):
         if process.returncode: raise RuntimeError('native backend failed:\n' + process.stderr)
     return output
 
-COMMAND_CHOICES = ['check', 'emit', 'build', 'run', 'test', 'api', 'adopt', 'characterize', 'lens', 'audit', 'slice', 'map', 'manifest', 'explain']
+COMMAND_CHOICES = ['mcp', 'brief', 'check', 'emit', 'build', 'run', 'test', 'api', 'adopt', 'characterize', 'lens', 'audit', 'slice', 'map', 'manifest', 'explain']
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1190,6 +1198,9 @@ def main(argv=None):
                 print('run `axle test ' + summary['tests_file'] + '` to replay them')
             return 0
         try:
+            if options.command == 'mcp':
+                import mcp_server
+                return mcp_server.serve()
             if options.command in {'manifest', 'explain'}:
                 import manifest
                 return manifest.run(options.command, options)
@@ -1198,6 +1209,9 @@ def main(argv=None):
             if options.command == 'test':
                 import testing
                 return testing.run(options)
+            if options.command == 'brief':
+                import lens
+                return lens.brief(options)
             if options.command in {'lens', 'audit', 'slice', 'map'}:
                 import lens
                 return lens.run(options.command, options)
@@ -1231,9 +1245,19 @@ def main(argv=None):
             if error.hint: diagnostic['hint'] = error.hint
             if error.suggestion: diagnostic['suggestion'] = error.suggestion
         if isinstance(error, Error) and error.source: diagnostic['source'] = error.source
+        if isinstance(error, Error) and error.source:
+            try:
+                text = pathlib.Path(error.source).read_text(encoding='utf-8').splitlines()[error.line - 1]
+                diagnostic['snippet'] = text
+                diagnostic['caret'] = ' ' * (error.column - 1) + '^'
+            except (OSError, IndexError, UnicodeError):
+                pass
         if options.json: print(json.dumps(diagnostic), file=sys.stderr)
         else:
             print(f'{diagnostic.get("source", options.source)}:{diagnostic.get("line", 1)}:{diagnostic.get("column", 1)}: {error}', file=sys.stderr)
+            if diagnostic.get('snippet') is not None:
+                print('  | ' + diagnostic['snippet'], file=sys.stderr)
+                print('  | ' + diagnostic['caret'], file=sys.stderr)
             if diagnostic.get('hint'): print('  hint: ' + diagnostic['hint'], file=sys.stderr)
         return 1
 

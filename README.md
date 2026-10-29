@@ -132,6 +132,17 @@ fn guarded is declared nothrow but can abort: division by zero (line 3, in fn di
 
 `nothrow` does not cover running out of memory or stack, and it says nothing about termination (`audit` reports loops and recursion separately). A foreign C function can be trusted with `extern "c" fn f(...) -> T nothrow noalloc;`; AXLE records that as a claim it cannot verify. Python and JavaScript bridge functions can never carry either guarantee. The checker is tested against randomly generated programs: anything it accepts as `nothrow` must run without aborting.
 
+## Use it from an AI agent
+
+```
+axle mcp          # Model Context Protocol server on stdin/stdout, no dependencies
+axle brief DIR    # the same orientation as plain text or --json
+```
+
+Add the server to any MCP-capable agent or editor (`examples/mcp.json` shows the shape). The agent then has `axle_brief` (start here), `axle_check` (errors carry the failing source line, a caret and a fix hint), `axle_slice`, `axle_lens`, `axle_audit`, `axle_map`, `axle_test`, `axle_run`, `axle_adopt`, `axle_characterize`, `axle_explain` and `axle_manifest`. Every call runs in a separate process with a time limit. `axle_characterize` runs the project's own code with sample inputs; `axle_adopt` does not.
+
+Type mismatches name the exact conversion (`expected f64, got i64` suggests `f64_from_i64(x)`), and `as_u64` / `as_i64` convert between integer signedness.
+
 ## Legacy code and drift
 
 ```

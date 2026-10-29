@@ -1,0 +1,118 @@
+import io
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import mcp_server
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def cli(*args):
+    return subprocess.run([sys.executable, str(ROOT / 'axle.py'), *map(str, args)], capture_output=True, text=True,
+                          env=dict(os.environ, AXLE_PYTHON=sys.executable))
+
+
+def source(directory, text, name='main.axl'):
+    path = pathlib.Path(directory) / name
+    path.write_text(text, encoding='utf-8')
+    return path
+
+
+def rpc(*messages):
+    stdin = io.StringIO('\n'.join(json.dumps(m) for m in messages) + '\n')
+    stdout = io.StringIO()
+    mcp_server.serve(stdin, stdout)
+    return [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_error_shows_source_line_caret_and_conversion(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn main() -> unit { let a = 1.5 + 2; }')
+            result = cli('check', path)
+            self.assertIn('| fn main() -> unit { let a = 1.5 + 2; }', result.stderr)
+            self.assertIn('f64_from_i64', result.stderr)
+            data = json.loads(cli('check', path, '--json').stderr)
+            self.assertEqual(data['snippet'], 'fn main() -> unit { let a = 1.5 + 2; }')
+            self.assertEqual(data['caret'].index('^') + 1, data['column'])
+
+    def test_signedness_conversion_exists_and_wraps(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = source(d, 'fn main() -> unit ![io] { print(as_u64(-1)); print(as_i64(18446744073709551615u64)); }')
+            self.assertEqual(cli('run', path).stdout.split(), ['18446744073709551615', '-1'])
+
+    def test_every_mismatch_hint_names_a_real_builtin(self):
+        import axle
+        for hint in axle.Compiler.CONVERT.values():
+            name = hint.split('(')[0]
+            if name.isidentifier() and '_' in name:
+                self.assertIn(name, axle.BUILTINS, hint)
+
+
+class BriefTests(unittest.TestCase):
+    def test_file_brief(self):
+        with tempfile.TemporaryDirectory() as d:
+            source(d, '/// Doubles a number.\n/// why: marketing asked for it.\nfn twice(x: i64) -> i64 { return x * 2; }\nfn main() -> unit ![io] { print(twice(2)); }')
+            result = cli('brief', pathlib.Path(d) / 'main.axl', '--json')
+            data = json.loads(result.stdout)
+            self.assertEqual(data['function_count'], 2)
+            signatures = [f['signature'] for m in data['modules'] for f in m['functions']]
+            self.assertTrue(any('twice' in s for s in signatures))
+            text = cli('brief', pathlib.Path(d) / 'main.axl').stdout
+            self.assertIn('Doubles a number.', text)
+            self.assertIn('marketing asked for it', text)
+
+    def test_directory_brief_has_no_side_effects(self):
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / 'a.py').write_text('def f(x: int) -> int:\n    return x\ndef g(x):\n    return x\n')
+            text = cli('brief', d).stdout
+            self.assertIn('fn f(x: i64) -> i64', text)
+            self.assertIn('skipped', text)
+            self.assertFalse((pathlib.Path(d) / '.axle').exists())
+
+
+class McpTests(unittest.TestCase):
+    def test_handshake_and_listing(self):
+        replies = rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-03-26'}},
+                      {'jsonrpc': '2.0', 'method': 'notifications/initialized'},
+                      {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
+                      {'jsonrpc': '2.0', 'id': 3, 'method': 'nope'})
+        self.assertEqual([r['id'] for r in replies], [1, 2, 3])        # the notification gets no reply
+        self.assertEqual(replies[0]['result']['protocolVersion'], '2025-03-26')
+        names = {t['name'] for t in replies[1]['result']['tools']}
+        self.assertTrue({'axle_brief', 'axle_check', 'axle_slice', 'axle_lens', 'axle_test'} <= names)
+        for tool in replies[1]['result']['tools']:
+            self.assertEqual(tool['inputSchema']['type'], 'object')
+            self.assertTrue(set(tool['inputSchema']['required']) <= set(tool['inputSchema']['properties']), tool['name'])
+        self.assertEqual(replies[2]['error']['code'], -32601)
+
+    def test_tool_calls(self):
+        with tempfile.TemporaryDirectory() as d:
+            good = source(d, 'fn twice(x: i64) -> i64 { return x * 2; }\nfn test_twice() -> unit { assert(twice(2) == 4); }\nfn main() -> unit ![io] { print(twice(2)); }')
+            bad = source(d, 'fn main() -> unit { let a = 1.5 + 2; }', 'bad.axl')
+            call = lambda i, name, **args: {'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': name, 'arguments': args}}
+            replies = rpc(call(1, 'axle_check', path=str(good)), call(2, 'axle_check', path=str(bad)), call(3, 'axle_slice', path=str(good), function='twice'),
+                          call(4, 'axle_test', path=str(good)), call(5, 'axle_run', path=str(good)), call(6, 'axle_slice', path=str(good)), call(7, 'nothing', path='x'))
+            results = [r['result'] for r in replies]
+            self.assertFalse(results[0]['isError'])
+            self.assertTrue(results[1]['isError'])
+            self.assertEqual(json.loads(results[1]['content'][0]['text'])['code'], 'E002')
+            self.assertIn('fn twice', results[2]['content'][0]['text'])
+            self.assertFalse(results[3]['isError'])
+            self.assertEqual(results[4]['content'][0]['text'], '4')
+            self.assertIn('missing argument', results[5]['content'][0]['text'])
+            self.assertTrue(results[6]['isError'])
+
+    def test_cli_entry_point(self):
+        process = subprocess.run([sys.executable, str(ROOT / 'axle.py'), 'mcp'], input='{"jsonrpc":"2.0","id":1,"method":"ping"}\n', capture_output=True, text=True)
+        self.assertEqual(json.loads(process.stdout), {'jsonrpc': '2.0', 'id': 1, 'result': {}})
+
+
+if __name__ == '__main__':
+    unittest.main()

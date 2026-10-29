@@ -49,6 +49,7 @@ Discuss each extension before implementing it:
 
 - Records with specified layouts and predictable field access.
 - Checked slices and generic containers with explicit ownership rules.
+- Measure agent task success with and without the MCP tools on real projects (nothing is claimed until this exists).
 - Additional scalar widths (`f32`, narrower integers) and byte buffers. `f64`, immutable `str` and value structs are done.
 - Module namespaces and build/project integration.
 

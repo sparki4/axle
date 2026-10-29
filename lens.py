@@ -526,6 +526,89 @@ def run(command, options):
     return 0
 
 
+def brief_file(path):
+    analysis = Analysis(path)
+    architecture = analysis.architecture()
+    audit = analysis.audit()
+    modules = []
+    count = 0
+    for module in architecture['modules']:
+        functions = []
+        for function in module['functions']:
+            count += 1
+            functions.append(dict(signature=function['signature'], line=function['line'], doc=(function.get('doc') or [''])[0],
+                                  why=function.get('why') or []))
+        modules.append(dict(path=module['path'], purpose=(module.get('purpose') or [''])[0], functions=functions))
+    order = {'unimplemented': 0, 'silent-failure': 1}
+    findings = sorted(audit['findings'], key=lambda f: (order.get(f['kind'], 2), f['function']))
+    return dict(entry=architecture['entry'], entry_points=architecture.get('entry_points', []), module_count=len(modules), function_count=count,
+                modules=modules, attention=findings[:12], attention_total=len(findings),
+                guarantees=architecture.get('guarantees', []), doc_gaps=architecture.get('doc_gaps', []))
+
+
+def brief_directory(root):
+    import adopt
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='axle-brief-') as temp:
+        report = adopt.run(root, temp)
+    reasons = {}
+    for item in report['skipped']:
+        key = item['reason'].split(' (')[0]
+        if 'parameter type' in key or "parameter '" in key:
+            key = key.split('`')[0].split("'")[0].strip() + ' ...'
+        reasons[key[:70]] = reasons.get(key[:70], 0) + 1
+    top = sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
+    return dict(root=str(root), files_scanned=report['files_scanned'], bound=report['bound'], skipped=report['skipped_count'],
+                by_language=report['bound_by_language'], callable=[b['signature'] for b in report['bindings'][:25]],
+                top_skip_reasons=[dict(reason=k, count=v) for k, v in top],
+                legacy=[dict(file=l['file'], program=l['program_id'], paragraphs=len(l['paragraphs']),
+                             undocumented=len(l['undocumented_paragraphs'])) for l in report['legacy']])
+
+
+def render_brief(result):
+    if 'modules' not in result:
+        out = [f'# Brief: {result["root"]}', '',
+               f'Scanned {result["files_scanned"]} files. AXLE can call {result["bound"]} functions today and skipped {result["skipped"]}.']
+        if result['by_language']: out.append('Callable by language: ' + ', '.join(f'{n} {k}' for k, n in sorted(result['by_language'].items())) + '.')
+        if result['callable']:
+            out += ['', '## Callable now'] + [f'- `{sig}`' for sig in result['callable']]
+        if result['top_skip_reasons']:
+            out += ['', '## Why the rest was skipped (most common first)'] + [f'- {r["count"]} x {r["reason"]}' for r in result['top_skip_reasons']]
+        if result['legacy']:
+            out += ['', '## Legacy programs (structure only, not callable)']
+            out += [f'- {l["program"] or l["file"]}: {l["paragraphs"]} paragraphs, {l["undocumented"]} without a comment' for l in result['legacy']]
+        out += ['', '## Next', '- `axle adopt DIR` writes `.axle/bindings.axl` and `.axle/axle.map.json`; import the bindings from your .axl file.',
+                '- `axle characterize DIR` records current behavior as tests before you change anything.',
+                '- Add type annotations (`int`, `str`, `float`, `bool`) in the source to make skipped Python functions callable.']
+        return '\n'.join(out)
+    out = [f'# Brief: {pathlib.Path(result["entry"]).name}', '',
+           f'{result["module_count"]} module(s), {result["function_count"]} function(s). Entry points: {", ".join(result["entry_points"]) or "none (library)"}.']
+    for module in result['modules']:
+        out += ['', f'## {module["path"]}']
+        if module['purpose']: out.append(module['purpose'])
+        for function in module['functions']:
+            line = f'- `{function["signature"]}` (line {function["line"]})'
+            if function['doc']: line += ' - ' + function['doc']
+            out.append(line)
+            out += [f'    why: {w}' for w in function['why']]
+    if result['guarantees']:
+        out += ['', '## Proven guarantees'] + [f'- {g}' if isinstance(g, str) else f'- {g}' for g in result['guarantees']]
+    out += ['', f'## Needs attention ({result["attention_total"]})']
+    out += [f'- [{f["kind"]}] {f["function"]}: {f["detail"]}' for f in result['attention']] or ['- nothing flagged']
+    if result['doc_gaps']:
+        out += ['', 'No `///` comment: ' + ', '.join(result['doc_gaps'][:15])]
+    out += ['', '## Work here', '- `axle slice FILE --fn NAME` before changing a function; `axle lens FILE --line N` before trusting a line.',
+            '- `axle check FILE --json` after every edit; errors carry a fix hint.', '- `axle test FILE` runs `fn test_*` functions; `axle audit FILE` lists what to tighten.']
+    return '\n'.join(out)
+
+
+def brief(options):
+    source = pathlib.Path(options.source)
+    result = brief_directory(source) if source.is_dir() else brief_file(source)
+    print(json.dumps(result, indent=2) if options.json else render_brief(result))
+    return 0
+
+
 def enforce_strict(path):
     """Raise E080 if any strict finding exists: patterns that hide a failure instead of surfacing it."""
     analysis = Analysis(path)

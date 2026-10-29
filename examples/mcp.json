@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "axle": { "command": "python", "args": ["axle.py", "mcp"] }
+  }
+}

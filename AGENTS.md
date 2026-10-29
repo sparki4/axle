@@ -4,6 +4,7 @@ AXLE is small on purpose: explicit types, explicit effects, one obvious way to w
 
 ## Workflow
 
+0. Orient first: `python axle.py brief <file-or-dir>` (or the `axle_brief` tool over `axle mcp`). One call gives modules, signatures, doc comments, what needs attention, or for a foreign project what is callable and why the rest is not.
 1. Understand what exists: `python axle.py adopt <project>` then read `.axle/axle.map.json`. `bound` lists callable functions with their AXLE signatures; `skipped` lists what was left out and why (usually a missing type annotation). Add the annotation to the source and run `adopt` again.
 2. Write AXLE that imports `.axle/bindings.axl`. Do not edit that file; regenerate it.
 3. Check cheaply: `python axle.py check main.axl --json`. Errors carry `code`, `line`, `column`, `hint`, and `suggestion` when a near-match name exists. Apply the hint, do not guess.

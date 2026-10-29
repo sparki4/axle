@@ -132,6 +132,19 @@ fn guarded is declared nothrow but can abort: division by zero (line 3, in fn di
 
 `nothrow` does not cover running out of memory or stack, and it says nothing about termination (`audit` reports loops and recursion separately). A foreign C function can be trusted with `extern "c" fn f(...) -> T nothrow noalloc;`; AXLE records that as a claim it cannot verify. Python and JavaScript bridge functions can never carry either guarantee. The checker is tested against randomly generated programs: anything it accepts as `nothrow` must run without aborting.
 
+## Legacy code and drift
+
+```
+axle adopt legacy/            # also reads COBOL: writes .axle/legacy-notes.md
+axle adopt --check legacy/    # exit 1 if the bindings no longer match the source
+axle characterize legacy/     # record what adopted functions do today as tests
+axle test legacy/.axle/characterization.test.axl
+```
+
+- COBOL is analysed structurally only (data items, files, paragraphs, what each performs, reads, writes, decides, and the hard-coded numbers). It is not callable from AXLE, and nothing is inferred about intent: paragraphs without a comment get a `TODO why` line.
+- `characterize` runs sample inputs through the real Python, JavaScript or C code and writes asserts for the observed results. It records behavior, not correctness; a failing assert after a change means behavior changed.
+- Only functions with `i64`, `u64` or `bool` signatures are covered.
+
 ## Mix host and guest languages
 
 A Python host can contain JavaScript, Rust, or C:

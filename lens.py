@@ -13,8 +13,64 @@ and `noalloc`, so the report cannot drift from what is actually checked.
 """
 import json
 import pathlib
+import re
 
 import axle
+
+# ---------------------------------------------------------------- syntax-tree helpers
+
+def walk_stmts(statements):
+    for st in statements:
+        yield st
+        kind = st[0]
+        if kind == 'if':
+            yield from walk_stmts(st[3])
+            if st[4]: yield from walk_stmts(st[4])
+        elif kind == 'while':
+            yield from walk_stmts(st[3])
+        elif kind == 'unsafe':
+            yield from walk_stmts(st[2])
+
+
+def stmt_exprs(st):
+    kind = st[0]
+    if kind == 'bind': return [st[5]]
+    if kind == 'assign': return [st[2], st[3]]
+    if kind == 'return': return [st[2]] if st[2] is not None else []
+    if kind in {'if', 'while'}: return [st[2]]
+    if kind == 'expr': return [st[2]]
+    return []
+
+
+def walk_expr(e):
+    yield e
+    kind = e[0]
+    if kind == 'unary': yield from walk_expr(e[2])
+    elif kind == 'binary':
+        yield from walk_expr(e[2])
+        yield from walk_expr(e[3])
+    elif kind == 'call':
+        for a in e[2]: yield from walk_expr(a)
+
+
+def all_exprs(body):
+    for st in walk_stmts(body):
+        for e in stmt_exprs(st):
+            yield from walk_expr(e)
+
+
+def is_literal(e):
+    return e is not None and e[0] in {'number', 'bool'}
+
+
+def is_zero(e):
+    return e[0] == 'number' and int(re.match(r'[0-9]+', e[1].value)[0]) == 0
+
+
+def returns_made_up_value(block):
+    """True if the block returns a literal (or nothing) instead of failing."""
+    return any(st[0] == 'return' and (st[2] is None or is_literal(st[2])) for st in walk_stmts(block))
+
 
 BUCKETS = {'abort': 'aborts', 'alloc': 'allocs', 'io': 'io', 'write': 'writes', 'loop': 'loops', 'alias': 'aliases'}
 
@@ -25,7 +81,7 @@ class Analysis:
         self.loaded = axle.load_program(path)
         loaded = self.loaded
         self.compiler = axle.Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links,
-                                      natives=loaded.natives, guarantees=loaded.guarantees)
+                                      natives=loaded.natives, guarantees=loaded.guarantees, require_main=False)
         self.compiler.compile()
         self.facts = self.compiler.facts
         self.graph = self.compiler.call_graph()
@@ -137,6 +193,116 @@ class Analysis:
         if summary['may_not_terminate']: parts.append('may not terminate (loop or recursion)')
         return ', '.join(parts) if parts else 'pure: no aborts, allocations, I/O, mutation or foreign calls'
 
+    # ------------------------------------------------------------ risky patterns
+    def docs(self, name):
+        info = self.info[name]
+        lines = pathlib.Path(info['file']).read_text(encoding='utf-8').splitlines()
+        out, i = [], info['start'] - 2
+        while i >= 0 and lines[i].lstrip().startswith('///'):
+            out.insert(0, lines[i].lstrip()[3:].strip())
+            i -= 1
+        return out
+
+    def risks(self):
+        """Patterns that usually hide a failure instead of surfacing it."""
+        out = []
+        bodies = {name.value: (name, params, body) for name, params, _, _, body in self.loaded.functions}
+
+        def add(kind, fn, line, detail, strict):
+            out.append(dict(kind=kind, function=fn, line=line, detail=detail, strict=strict))
+
+        for fn, (name, params, body) in bodies.items():
+            exprs = list(all_exprs(body))
+            names = {e[1].value for e in exprs if e[0] == 'name'}
+            returns = [st for st in walk_stmts(body) if st[0] == 'return']
+            if params and not any(p.value in names for p, _ in params) and returns and all(is_literal(r[2]) for r in returns):
+                add('stub-like', fn, name.line, 'ignores every parameter and only returns constants: a stub, or made-up data', True)
+            for p, _ in params:
+                if p.value not in names and any(p2.value in names for p2, _ in params):
+                    add('unused-parameter', fn, p.line, f'parameter `{p.value}` is never read', False)
+            divisors = {e[3][1].value for e in exprs if e[0] == 'binary' and e[1].value in {'/', '%'} and e[3][0] == 'name'}
+            indexed = {(e[2][0][1].value, e[2][1][1].value) for e in exprs
+                       if e[0] == 'call' and e[1].value in {'buf_get', 'buf_set'} and len(e[2]) >= 2 and e[2][0][0] == 'name' and e[2][1][0] == 'name'}
+            for st in walk_stmts(body):
+                if st[0] != 'if': continue
+                cond = st[2]
+                if cond[0] != 'binary': continue
+                sides = (cond[2], cond[3])
+                if cond[1].value == '==':
+                    for a, b in (sides, sides[::-1]):
+                        if a[0] == 'name' and a[1].value in divisors and b[0] == 'number' and is_zero(b) and returns_made_up_value(st[3]):
+                            add('masked-failure', fn, st[1].line,
+                                f'when `{a[1].value}` is 0 this returns a made-up value instead of failing; use assert({a[1].value} != 0) or handle it explicitly', True)
+                if cond[1].value in {'>=', '>', '<', '<='}:
+                    for a, b in (sides, sides[::-1]):
+                        if a[0] == 'name' and b[0] == 'call' and b[1].value == 'buf_len' and b[2] and b[2][0][0] == 'name' and \
+                                (b[2][0][1].value, a[1].value) in indexed and returns_made_up_value(st[3]):
+                            add('masked-failure', fn, st[1].line,
+                                f'an out-of-range `{a[1].value}` returns a made-up value instead of failing; use assert', True)
+            for e in exprs:
+                if e[0] == 'call' and e[1].value == 'assert' and len(e[2]) == 1:
+                    a = e[2][0]
+                    trivial = (a[0] == 'bool' and a[1].value == 'true') or \
+                              (a[0] == 'binary' and a[1].value == '==' and ((a[2][0] == 'name' and a[3][0] == 'name' and a[2][1].value == a[3][1].value) or
+                                                                           (a[2][0] == 'number' and a[3][0] == 'number' and a[2][1].value == a[3][1].value)))
+                    if trivial:
+                        add('tautological-assert', fn, e[1].line, 'this assertion can never fail, so it checks nothing', True)
+            for fact in self.facts.get(fn, []):
+                if fact['kind'] == 'unimplemented':
+                    add('unimplemented', fn, fact['line'], 'placeholder: this code path is not implemented', True)
+            if fn.startswith('test_') and not bodies[fn][1]:
+                parent = self.reach(fn)
+                checks = any(f['kind'] == 'abort' and f.get('via') in {'assert', 'abort'} for n in parent for f in self.facts.get(n, []))
+                if not checks:
+                    add('test-without-assert', fn, name.line, 'this test never asserts anything, so it cannot fail', True)
+            risky = any(f['kind'] == 'unsafe' or f['kind'] == 'foreign' for f in self.facts.get(fn, [])) or self.info[fn]['guarantees']
+            if risky and not self.docs(fn):
+                add('undocumented-risky-function', fn, name.line, 'uses unsafe memory, foreign code or a guarantee but has no `///` documentation saying why', False)
+        return out
+
+    # ------------------------------------------------------------ architecture
+    def module_purpose(self, file):
+        out = []
+        for line in pathlib.Path(file).read_text(encoding='utf-8').splitlines():
+            text = line.strip()
+            if text.startswith('//!'): out.append(text[3:].strip())
+            elif text and not text.startswith('//') and not text.startswith('edition'): break
+        return out
+
+    def architecture(self):
+        entry_dir = pathlib.Path(self.entry).parent
+        rel = lambda f: pathlib.Path(f).resolve().relative_to(entry_dir).as_posix() if entry_dir in pathlib.Path(f).resolve().parents else f
+        modules = {}
+        for file in self.loaded.modules:
+            modules[file] = dict(path=rel(file), purpose=self.module_purpose(file), imports=[], functions=[], calls_into={})
+        for importer, imported in self.loaded.import_edges:
+            if importer in modules and imported in modules and rel(imported) not in modules[importer]['imports']:
+                modules[importer]['imports'].append(rel(imported))
+        undocumented = []
+        for name, info in self.info.items():
+            if info['file'] not in modules: continue
+            docs = self.docs(name)
+            why = [line[4:].strip() for line in docs if line.lower().startswith('why:')]
+            summary = self.summary(name)
+            entry = dict(name=name, kind=info['kind'], signature=self.signature(name), line=info['start'],
+                         doc=[line for line in docs if not line.lower().startswith('why:')], why=why, footprint=self.phrase(summary),
+                         callers=sorted(n for n, targets in self.graph.items() if name in targets))
+            modules[info['file']]['functions'].append(entry)
+            if not docs and info['kind'] == 'fn' and name != 'main' and not name.startswith('test_'): undocumented.append(name)
+            for callee in self.graph.get(name, []):
+                target = self.info[callee]['file']
+                if target != info['file'] and target in modules:
+                    counts = modules[info['file']]['calls_into']
+                    counts[rel(target)] = counts.get(rel(target), 0) + 1
+        boundaries = []
+        for name, info in self.info.items():
+            if info['kind'] == 'extern':
+                boundaries.append(dict(name=name, abi=info['abi'], symbol=info['symbol'], declared_in=rel(info['file']),
+                                       callers=sorted(n for n, targets in self.graph.items() if name in targets)))
+        entries = [n for n in self.info if n == 'main' or n.startswith('test_')]
+        return dict(entry=self.entry, modules=list(modules.values()), foreign_boundaries=boundaries, entry_points=entries,
+                    undocumented=undocumented, guarantees={n: i['guarantees'] for n, i in self.info.items() if i['guarantees']})
+
     # ------------------------------------------------------------ views
     def function_at(self, file, line):
         for info in self.info.values():
@@ -219,6 +385,10 @@ class Analysis:
                 findings.append(dict(kind='could-declare', function=r['name'], detail=' '.join(r['could_declare']) + ' would be accepted and checked'))
             if r['kind'] == 'fn' and r['counts']['aliases']:
                 findings.append(dict(kind='shared-buffer-aliasing', function=r['name'], detail=f'{r["counts"]["aliases"]} place(s) create a second handle to shared storage'))
+        for risk in self.risks():
+            findings.append(dict(kind=risk['kind'], function=risk['function'], line=risk['line'], detail=risk['detail'],
+                                 severity='strict' if risk['strict'] else 'advice'))
+        findings.sort(key=lambda f: (f.get('severity') != 'strict', f.get('severity') != 'advice'))
         return dict(entry=self.entry, functions=rows, findings=findings)
 
     def slice(self, name, depth=0):
@@ -248,8 +418,9 @@ class Analysis:
             context.append(dict(name=callee, signature=self.signature(callee), kind=self.info[callee]['kind'],
                                 footprint=self.phrase(self.summary(callee)), file=self.info[callee]['file'], line=self.info[callee]['start']))
         callers = sorted(n for n, targets in self.graph.items() if name in targets)
+        docs = self.docs(name) if self.info[name]['kind'] == 'fn' else []
         return dict(function=name, signature=self.signature(name), footprint=self.phrase(self.summary(name)),
-                    bodies=bodies, callees=context, callers=callers, depth=depth)
+                    doc=docs, bodies=bodies, callees=context, callers=callers, depth=depth)
 
 
 # ---------------------------------------------------------------- text rendering
@@ -277,12 +448,48 @@ def render_audit(a):
         out.append('')
         out.append('findings:')
         for f in a['findings']:
-            out.append(f'  [{f["kind"]}] {f["function"]}: {f["detail"]}')
+            where = f' (line {f["line"]})' if f.get('line') else ''
+            tag = ' !' if f.get('severity') == 'strict' else ''
+            out.append(f'  [{f["kind"]}]{tag} {f["function"]}{where}: {f["detail"]}')
     return '\n'.join(out)
 
 
+def render_map(m):
+    out = [f'# Architecture of {pathlib.Path(m["entry"]).name}', '']
+    if m['entry_points']: out.append('Entry points: ' + ', '.join(m['entry_points']) + '\n')
+    for mod in m['modules']:
+        out.append(f'## {mod["path"]}')
+        out.append(' '.join(mod['purpose']) if mod['purpose'] else '_No `//!` purpose line._')
+        if mod['imports']: out.append('Imports: ' + ', '.join(mod['imports']))
+        if mod['calls_into']: out.append('Calls into: ' + ', '.join(f'{k} ({v} call sites)' for k, v in sorted(mod['calls_into'].items())))
+        out.append('')
+        for f in mod['functions']:
+            out.append(f'- `{f["signature"]}`')
+            if f['doc']: out.append('    ' + ' '.join(f['doc']))
+            for reason in f['why']: out.append(f'    Why: {reason}')
+            out.append(f'    Footprint: {f["footprint"]}')
+            if f['callers']: out.append('    Called by: ' + ', '.join(f['callers']))
+        out.append('')
+    if m['foreign_boundaries']:
+        out.append('## Foreign boundaries')
+        for b in m['foreign_boundaries']:
+            out.append(f'- `{b["name"]}` -> {b["abi"]} `{b["symbol"]}` (declared in {b["declared_in"]}; used by {", ".join(b["callers"]) or "nothing"})')
+        out.append('')
+    if m['guarantees']:
+        out.append('## Proven guarantees')
+        out += [f'- `{n}`: {" ".join(g)}' for n, g in sorted(m['guarantees'].items())]
+        out.append('')
+    if m['undocumented']:
+        out.append('## Documentation gaps')
+        out.append('No `///` comment: ' + ', '.join(m['undocumented']) + '. Add what each is for, and `/// why: ...` for any non-obvious decision.')
+    return '\n'.join(out).rstrip()
+
+
 def render_slice(s):
-    out = [f'# context for `{s["function"]}`', f'signature: {s["signature"]}', f'footprint: {s["footprint"]}', '']
+    out = [f'# context for `{s["function"]}`', f'signature: {s["signature"]}', f'footprint: {s["footprint"]}']
+    out += [f'purpose: {line}' for line in s.get('doc', []) if not line.lower().startswith('why:')]
+    out += [f'why: {line[4:].strip()}' for line in s.get('doc', []) if line.lower().startswith('why:')]
+    out.append('')
     for body in s['bodies']:
         out.append(f'## {body["name"]}  ({body["file"]}:{body["start"]}-{body["end"]})')
         out.append(body['source'])
@@ -305,6 +512,9 @@ def run(command, options):
             raise axle.Error('lens requires --line N', hint='example: axle lens main.axl --line 12')
         result = analysis.lens(options.line, options.file)
         print(json.dumps(result, indent=2) if options.json else render_lens(result))
+    elif command == 'map':
+        result = analysis.architecture()
+        print(json.dumps(result, indent=2) if options.json else render_map(result))
     elif command == 'audit':
         result = analysis.audit()
         print(json.dumps(result, indent=2) if options.json else render_audit(result))
@@ -314,3 +524,15 @@ def run(command, options):
         result = analysis.slice(options.fn, options.depth)
         print(json.dumps(result, indent=2) if options.json else render_slice(result))
     return 0
+
+
+def enforce_strict(path):
+    """Raise E080 if any strict finding exists: patterns that hide a failure instead of surfacing it."""
+    analysis = Analysis(path)
+    strict = [r for r in analysis.risks() if r['strict']]
+    if strict:
+        first = strict[0]
+        more = f' (and {len(strict) - 1} more; run `axle audit` to see all)' if len(strict) > 1 else ''
+        token = axle.Token('', first['line'], 1, analysis.info[first['function']]['file'])
+        raise axle.Error(f'strict: {first["kind"]} in fn {first["function"]}: {first["detail"]}{more}', token,
+                         hint='make the failure explicit with assert(...) or abort(); do not return invented values')

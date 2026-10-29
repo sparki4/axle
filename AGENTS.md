@@ -13,6 +13,10 @@ AXLE is small on purpose: explicit types, explicit effects, one obvious way to w
 7. Inspect the surface: `python axle.py api main.axl` returns every function, parameter type, result type and effect as JSON.
 8. Run: `python axle.py run main.axl`.
 
+9. Test: `python axle.py test file.axl` runs every `fn test_*() -> unit` in isolation. Add `--strict` to reject stubs, `unimplemented()`, masked failures and asserts that cannot fail.
+10. Learn the project: `python axle.py map main.axl` (modules and dependencies), `python axle.py manifest` (every command, code and builtin, machine-readable), `python axle.py explain E001`.
+11. Legacy code: `python axle.py characterize <dir>` after `adopt` records current behavior as tests; run `adopt --check` to detect drift. COBOL gets `.axle/legacy-notes.md` (structure only).
+
 ## Rules that cause most errors
 
 - Types are exact. `1` is `i64`, `1u64` is `u64`; there are no implicit conversions.

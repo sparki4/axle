@@ -9,6 +9,7 @@ C integer widths), and writes two files:
 
 Nothing in the scanned project is modified.
 """
+import cobol
 import ast
 import json
 import keyword
@@ -348,13 +349,36 @@ def signature(name, params, result, effects=None):
     return text + (f' ![{", ".join(effects)}]' if effects else '')
 
 
+def check(root, out_dir=None):
+    """Compare what adopt would generate now with what is on disk. Returns (ok, added, removed)."""
+    root = pathlib.Path(root).resolve()
+    out_dir = pathlib.Path(out_dir).resolve() if out_dir else root / '.axle'
+    existing = out_dir / 'bindings.axl'
+    if not existing.exists():
+        return False, [], [], 'no bindings.axl yet; run `axle adopt` first'
+    old = existing.read_text(encoding='utf-8')
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        run(root, tmp)
+        new = (pathlib.Path(tmp) / 'bindings.axl').read_text(encoding='utf-8')
+    strip = lambda text: [l for l in text.splitlines() if l.strip() and not l.startswith('//')]
+    a, b = strip(old), strip(new)
+    # the temp directory changes relative paths; compare by declaration name instead
+    names = lambda lines: {l: re.search(r'(?:fn )(\w+)\(([^)]*)\)\s*->\s*([\w*]+)', l) for l in lines if 'fn ' in l}
+    sig = lambda lines: {(m[1], m[2], m[3]) for m in names(lines).values() if m}
+    sa, sb = sig(a), sig(b)
+    added = sorted(f'{n}({p}) -> {r}' for n, p, r in sb - sa)
+    removed = sorted(f'{n}({p}) -> {r}' for n, p, r in sa - sb)
+    return not added and not removed, added, removed, None
+
+
 def run(root, out_dir=None):
     root = pathlib.Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f'{root} is not a directory')
     out_dir = pathlib.Path(out_dir).resolve() if out_dir else root / '.axle'
     out_dir.mkdir(parents=True, exist_ok=True)
-    found, skipped, defined_in, header_protos, scanned = [], [], {}, [], 0
+    found, skipped, defined_in, header_protos, scanned, legacy = [], [], {}, [], 0, []
     for path in walk(root):
         try:
             path.relative_to(out_dir)
@@ -371,6 +395,8 @@ def run(root, out_dir=None):
             handler = lambda: scan_c(path, rel, found, skipped, defined_in, header_protos)
         elif suffix == '.rs':
             handler = lambda: scan_rust(path, rel, found, skipped)
+        elif suffix.lower() in {'.cbl', '.cob', '.cobol', '.cpy'}:
+            handler = lambda: legacy.append(cobol.scan(path, rel))
         if handler:
             scanned += 1
             handler()
@@ -403,7 +429,10 @@ def run(root, out_dir=None):
         used.add(local)
         alias = f' = "{item.name}"' if local != item.name and item.lang != 'c' else ''
         params = item.params
-        entry = dict(name=local, foreign_name=item.name, language=item.lang, file=item.file, status='bound')
+        entry = dict(name=local, foreign_name=item.name, language=item.lang, file=item.file, status='bound',
+                     params=[dict(name=p, type=t) for p, t in params], result=item.result)
+        if item.lang in {'py', 'js'}:
+            entry['bridge'] = dict(language=item.lang, target=item.extra.get('module') or item.file)
         if item.lang in {'py', 'js'}:
             module = item.extra.get('module')
             if module:
@@ -445,7 +474,11 @@ def run(root, out_dir=None):
         'how_to_use': [f'import "{rel_posix(bindings, root)}";   // path relative to your .axl file', 'declare ![io] on callers',
                        'call `call: safe` entries directly; `call: unsafe` entries need an unsafe block'],
         'supported_types': 'i64, u64, bool, unit; C widths via c_int/c_uint/c_long/c_ulong/c_size; *i64/*u64/*bool pointers (C only)',
-        'bindings': entries, 'skipped': skipped,
+        'bindings': entries, 'skipped': skipped, 'legacy': legacy,
     }
+    if legacy:
+        (out_dir / 'legacy-notes.md').write_text('\n\n'.join(cobol.render(program) for program in legacy) + '\n', encoding='utf-8')
+        report['legacy_notes'] = str(out_dir / 'legacy-notes.md')
+        report['legacy_note'] = 'COBOL is analysed structurally only; it cannot be called from AXLE. See characterize for recording behavior.'
     (out_dir / 'axle.map.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
     return report

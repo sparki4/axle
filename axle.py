@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import bridge_runtime
 
 VERSION = '0.4.0'
+EDITION = '0.4'
 TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64'}
 
 # Stable diagnostic codes and generic repair hints, matched against the message.
@@ -34,9 +35,49 @@ DIAGNOSTICS = [
     (r'(break|continue) outside', 'E035', 'use break/continue only inside a while loop'),
     (r'^expected (i64|u64|bool|unit|buf_u64|\*)', 'E040', 'AXLE has no implicit conversions; make both sides the same type (literals take u64/i64 suffixes)'),
     (r'^arguments must have types', 'E041', 'pass arguments with exactly the declared types'),
+    (r'^edition', 'E070', 'run `axle manifest` for the current language description, then update the code or its edition line'),
+    (r'AXLE has no ', 'E071', None),
     (r'declared (nothrow|noalloc)', 'E060', 'remove the guarantee, or fix the call chain named in the message'),
     (r'extern|bridge|native|link', 'E050', None),
 ]
+
+# Constructs people and models bring from other languages, mapped to what AXLE actually has.
+IDIOMS = {
+    'println': 'use `print(x);` (one i64, u64 or bool per call)', 'printf': 'use `print(x);`', 'puts': 'use `print(x);`',
+    'echo': 'use `print(x);`', 'log': 'use `print(x);`', 'console': 'use `print(x);`',
+    'len': 'use `buf_len(buffer)`', 'length': 'use `buf_len(buffer)`', 'size': 'use `buf_len(buffer)`', 'count': 'use `buf_len(buffer)`',
+    'malloc': 'use `alloc_u64(count)` inside `unsafe`, or the checked `buf_new(count)`', 'calloc': 'use `buf_new(count)` (zero-initialised)',
+    'free': 'use `free_u64(pointer, count)` inside `unsafe`; checked buffers free themselves',
+    'new': 'use `buf_new(count)`', 'push': 'buffers have a fixed length; use `buf_new(n)` and `buf_set`', 'append': 'buffers have a fixed length; use `buf_new(n)` and `buf_set`',
+    'get': 'use `buf_get(buffer, index)`', 'set': 'use `buf_set(buffer, index, value)`', 'sum': 'use `buf_sum(buffer)`',
+    'null': 'there is no null; a missing value is a failure: use `assert(...)` or `abort()`', 'nil': 'there is no null; use `assert(...)` or `abort()`',
+    'None': 'there is no null; use `assert(...)` or `abort()`', 'NULL': 'there is no null; use `assert(...)` or `abort()`', 'undefined': 'there is no undefined value',
+    'panic': 'use `abort()`', 'exit': 'use `abort()` to stop with a failure', 'todo': 'use `unimplemented()`', 'unreachable': 'use `abort()`',
+    'min': 'write `if a < b { ... }`', 'max': 'write `if a > b { ... }`', 'abs': 'write `if x < 0 { return -x; }`', 'sqrt': 'there are no floats yet', 'pow': 'write a `while` loop',
+}
+FOREIGN_KEYWORDS = {
+    'for': 'AXLE has no for loops; write `var i = 0; while i < n { ...; i = i + 1; }`',
+    'foreach': 'AXLE has no foreach; use `while` with an index', 'do': 'AXLE has no do-while; use `while`',
+    'loop': 'AXLE has no `loop`; use `while true { ... break; }`', 'repeat': 'AXLE has no repeat; use `while`', 'until': 'AXLE has no until; use `while !(cond)`',
+    'switch': 'AXLE has no switch; use an `if` / `else if` chain', 'match': 'AXLE has no match; use an `if` / `else if` chain',
+    'try': 'AXLE has no exceptions: a failure aborts the program; use `assert(cond)` or `abort()`', 'catch': 'AXLE has no exceptions; failures abort the program',
+    'throw': 'AXLE has no exceptions; use `abort()`', 'raise': 'AXLE has no exceptions; use `abort()`',
+    'elif': 'write `else if`', 'elseif': 'write `else if`', 'const': 'use `let`', 'final': 'use `let`', 'auto': 'use `let`', 'val': 'use `let` (or `var` to reassign)',
+    'class': 'AXLE has no classes or structs yet; pass scalars and buffers', 'struct': 'AXLE has no structs yet; pass scalars and buffers',
+    'enum': 'AXLE has no enums yet; use integer constants', 'def': 'declare functions as `fn name(a: i64) -> i64 { ... }`',
+    'function': 'declare functions as `fn name(a: i64) -> i64 { ... }`', 'func': 'declare functions as `fn name(a: i64) -> i64 { ... }`',
+    'fun': 'declare functions as `fn name(a: i64) -> i64 { ... }`', 'pub': 'everything is public; just write `fn`', 'public': 'everything is public; just write `fn`',
+    'static': 'there are no globals; pass values as parameters', 'global': 'there are no globals; pass values as parameters',
+}
+TYPE_IDIOMS = {'int': 'use `i64` (signed) or `u64` (unsigned)', 'long': 'use `i64`', 'uint': 'use `u64`', 'usize': 'use `u64`', 'size_t': 'use `u64`',
+               'i32': 'use `i64`; narrower widths exist only as C ABI types in extern declarations (c_int)', 'u32': 'use `u64`', 'u8': 'use `u64`',
+               'float': 'there are no floats yet', 'double': 'there are no floats yet', 'f32': 'there are no floats yet', 'f64': 'there are no floats yet',
+               'string': 'there are no strings yet', 'str': 'there are no strings yet', 'void': 'use `unit`', 'boolean': 'use `bool`', 'char': 'use `u64`',
+               'Vec': 'use `buf_u64`', 'Array': 'use `buf_u64`', 'list': 'use `buf_u64`'}
+CHAR_IDIOMS = {'.': 'AXLE has no ranges, fields or method calls; call functions as `f(x)`', '"': 'strings are only valid in import/extern/link/native declarations',
+               "'": 'there are no character literals; use a u64 number', '@': 'AXLE has no attributes or decorators',
+               '#': 'comments start with `//`', '$': 'identifiers use letters, digits and `_`', '?': 'AXLE has no `?`; use `if`', '`': 'AXLE has no template strings'}
+COMPOUND = {'+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>='}
 
 def did_you_mean(name, candidates):
     match = difflib.get_close_matches(name, sorted(candidates), n=1, cutoff=0.6)
@@ -63,14 +104,19 @@ class Token:
     line: int
     column: int
     source: str | None = None
+    bad: bool = False
 
 def lex(source, source_name=None):
-    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
+    pattern = re.compile(r'\s+|//[^\n]*|"[^"\n]*"|[0-9]+(?:u64|i64)?|[A-Za-z_][A-Za-z_0-9]*|->|==|!=|<=|>=|<<=|>>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|&&|\|\||<<|>>|[{}()\[\],:;!~+*/%<>=&|^\-]')
     tokens, pos, line, column = [], 0, 1, 1
     while pos < len(source):
         match = pattern.match(source, pos)
         if not match:
-            raise Error('unexpected character ' + repr(source[pos]), Token('', line, column, source_name))
+            # Defer the error: the parser may find a more meaningful problem earlier (for example `for`).
+            tokens.append(Token(source[pos], line, column, source_name, bad=True))
+            pos += 1
+            column += 1
+            continue
         value = match.group()
         if not value.isspace() and not value.startswith('//'):
             tokens.append(Token(value, line, column, source_name))
@@ -88,9 +134,10 @@ ABI_TYPES = {'c_int': 'std::ffi::c_int', 'c_uint': 'std::ffi::c_uint', 'c_long':
 ABI_VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
 RESERVED = TYPES | set(ABI_TYPES) | {'import', 'fn', 'let', 'var', 'return', 'if', 'else', 'while', 'unsafe', 'true', 'false',
                                      'io', 'mem', 'extern', 'link', 'native', 'break', 'continue',
-                                     'nothrow', 'noalloc'}
+                                     'nothrow', 'noalloc', 'edition'}
 BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'offset',
-            'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec'}
+            'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec',
+            'abort', 'unimplemented'}
 
 class Parser:
     def __init__(self, source, source_name=None):
@@ -101,6 +148,8 @@ class Parser:
         return self.tokens[self.i].value
     def pop(self):
         token = self.tokens[self.i]
+        if token.bad:
+            raise Error('unexpected character ' + repr(token.value), token, hint=CHAR_IDIOMS.get(token.value))
         if token.value != '<eof>':
             self.i += 1
         return token
@@ -125,7 +174,7 @@ class Parser:
         if abi and not pointer and token.value in ABI_TYPES:
             return token.value
         if token.value not in TYPES or (pointer and token.value not in {'i64', 'u64', 'bool'}):
-            raise Error('expected a value type or pointer to a scalar', token)
+            raise Error('expected a value type or pointer to a scalar', token, hint=TYPE_IDIOMS.get(token.value))
         return ('*' if pointer else '') + token.value
     def header(self, abi=False):
         name = self.name()
@@ -164,6 +213,11 @@ class Parser:
         return token, token.value[1:-1]
     def program(self):
         functions = []
+        self.edition = self.edition_token = None
+        if self.peek() == 'edition':
+            self.edition_token = self.pop()
+            _, self.edition = self.quoted('edition')
+            self.need(';')
         while self.peek() != '<eof>':
             if self.take('import'):
                 path = self.pop()
@@ -190,6 +244,8 @@ class Parser:
                 self.externs.append(self.extern())
                 continue
             start = self.tokens[self.i]
+            if self.peek() in FOREIGN_KEYWORDS:
+                raise Error(f'AXLE has no `{self.peek()}`', start, hint=FOREIGN_KEYWORDS[self.peek()])
             self.need('fn')
             name, params, result, effects = self.header()
             if self.last_guarantees: self.guarantees[name.value] = self.last_guarantees
@@ -221,6 +277,8 @@ class Parser:
         return statements
     def statement(self):
         token = self.tokens[self.i]
+        if token.value in FOREIGN_KEYWORDS and self.tokens[self.i + 1].value != '=':
+            raise Error(f'AXLE has no `{token.value}`', token, hint=FOREIGN_KEYWORDS[token.value])
         if self.peek() in {'let', 'var'}:
             mutable = self.pop().value == 'var'
             name = self.name()
@@ -248,6 +306,10 @@ class Parser:
         if self.take('unsafe'):
             return ('unsafe', token, self.block())
         expr = self.expr()
+        if self.peek() in COMPOUND:
+            op = self.peek()
+            target = expr[1].value if expr[0] == 'name' else 'target'
+            raise Error(f'AXLE has no `{op}`', self.tokens[self.i], hint=f'write `{target} = {target} {op[:-1]} value;`')
         if self.take('='):
             rhs = self.expr()
             self.need(';')
@@ -289,6 +351,11 @@ class Parser:
 def rust_type(typ):
     return '*mut ' + typ[1:] if typ.startswith('*') else '()' if typ == 'unit' else 'AxleBuffer' if typ == 'buf_u64' else typ
 
+def check_edition(parser):
+    if parser.edition is not None and parser.edition != EDITION:
+        raise Error(f'edition {parser.edition} is not supported: this compiler implements edition {EDITION}', parser.edition_token,
+                    hint=f'run `axle manifest` for the current language, then write `edition \"{EDITION}\";` or remove the line')
+
 class RustSource(str):
     """Generated Rust text that also remembers what the final link needs."""
     links, natives = (), ()
@@ -298,8 +365,9 @@ def rust_literal(text):
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 class Compiler:
-    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=(), guarantees=None):
+    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=(), guarantees=None, require_main=True, test_mode=False):
         self.foreign_commands = foreign_commands or {}
+        self.test_mode = test_mode
         self.guarantees = dict(guarantees or {})
         self.facts, self.current = {}, None
         self.links, self.natives = list(links), list(natives)
@@ -307,6 +375,7 @@ class Compiler:
         if functions is None:
             parser = Parser(source)
             self.functions = parser.program()
+            check_edition(parser)
             externs += parser.externs
             self.guarantees.update(parser.guarantees)
             self.links += parser.links
@@ -339,8 +408,12 @@ class Compiler:
             declared = set(effects) | ({'io'} if lang != 'c' else set())
             self.signatures[name.value] = ([visible(t) for _, t in params], visible(result), declared)
             self.externs[name.value] = (kind_token, kind, params, result, symbol)
-        if 'main' not in self.signatures or self.signatures['main'][:2] != ([], 'unit'):
+        if 'main' in self.signatures and self.signatures['main'][:2] != ([], 'unit'):
             raise Error('program requires fn main() -> unit')
+        if 'main' not in self.signatures and require_main and not test_mode:
+            raise Error('program requires fn main() -> unit')
+        self.test_names = sorted(n for n, (p, r, e) in self.signatures.items()
+                                 if n.startswith('test_') and not p and r == 'unit' and n not in self.externs)
     def note(self, kind, token, **detail):
         """Record one footprint fact: something this source position can do."""
         if self.current is not None:
@@ -362,7 +435,7 @@ class Compiler:
         names = {name for scope in self.scopes for name in scope}
         close = did_you_mean(token.value, names)
         raise Error('unknown variable ' + token.value, token,
-                    hint=f'did you mean `{close}`?' if close else None, suggestion=close)
+                    hint=IDIOMS.get(token.value) or (f'did you mean `{close}`?' if close else None), suggestion=close)
     def expression(self, node):
         kind, token, *rest = node
         value = token.value
@@ -488,10 +561,17 @@ class Compiler:
                 self.note('io', token, what='prints to standard output', effect='io')
                 self.note('abort', token, why='standard output can fail (for example a closed pipe)', via='print', effect='io')
                 return 'unit', 'println!("{}", ' + codes[0] + ')'
+            if value in {'abort', 'unimplemented'}:
+                if types: raise Error(f'{value} takes no arguments', token)
+                self.note('abort', token, why='explicit abort' if value == 'abort' else 'unimplemented code is reached', via=value)
+                if value == 'unimplemented':
+                    self.note('unimplemented', token, what='placeholder: this code path is not implemented yet')
+                return 'unit', f'panic!("{value}()")'
             if value == 'assert':
                 if types != ['bool']: raise Error('assert requires one bool', token)
                 self.note('abort', token, why='assertion can fail', via='assert')
-                return 'unit', 'assert!(' + codes[0] + ')'
+                where = (pathlib.Path(token.source).name if token.source else 'source') + f':{token.line}'
+                return 'unit', 'assert!(' + codes[0] + f', "assertion failed at {where}")'
             if value == 'arg_u64':
                 self.effect('io', token)
                 if types != ['u64']: raise Error('arg_u64 requires one u64 index', token)
@@ -501,7 +581,7 @@ class Compiler:
             if value not in self.signatures:
                 close = did_you_mean(value, set(self.signatures) | BUILTINS)
                 raise Error('unknown function ' + value, token,
-                            hint=f'did you mean `{close}`?' if close else None, suggestion=close)
+                            hint=IDIOMS.get(value) or (f'did you mean `{close}`?' if close else None), suggestion=close)
             expected, result, effects = self.signatures[value]
             if types != expected: raise Error(f'arguments must have types {expected}, got {types}', token)
             for effect in sorted(effects): self.effect(effect, token)
@@ -577,6 +657,8 @@ class Compiler:
                 typ, code = self.expression(rest[0])
                 self.require(typ, 'unit', token)
                 lines.append(code + ';')
+                if rest[0][0] == 'call' and rest[0][1].value in {'abort', 'unimplemented'}:
+                    returned = ended = True      # diverges: no value has to be invented after it
         self.scopes.pop()
         return '\n'.join(lines), returned, ended
     def extern_wrapper(self, name, kind_token, kind, params, result, symbol):
@@ -689,7 +771,12 @@ class Compiler:
             if result != 'unit' and not returned: raise Error('not all paths return a value', name)
             arguments = ', '.join('v_' + p.value + ': ' + rust_type(t) for p, t in params)
             chunks.append(f'fn f_{name.value}({arguments}) -> {rust_type(result)} {{\n{body}\n}}')
-        chunks.append('fn main() { f_main(); }')
+        if self.test_mode:
+            arms = ''.join(f'"{n}" => f_{n}(), ' for n in self.test_names)
+            chunks.append('fn main() { let name = std::env::args().nth(1).unwrap_or_default(); match name.as_str() { ' + arms +
+                          '_ => { eprintln!("unknown test {}", name); std::process::exit(2); } } }')
+        else:
+            chunks.append('fn main() { f_main(); }' if 'main' in self.signatures else 'fn main() {}')
         self.verify_guarantees()
         result = RustSource('\n\n'.join(chunks) + '\n')
         result.links, result.natives = tuple(dict.fromkeys(self.links)), tuple(dict.fromkeys(self.natives))
@@ -702,7 +789,7 @@ class Loaded:
     """A fully resolved AXLE program: all modules, externs and link inputs."""
     def __init__(self):
         self.functions, self.externs, self.links, self.natives, self.modules = [], [], [], [], []
-        self.guarantees, self.spans = {}, {}
+        self.guarantees, self.spans, self.import_edges = {}, {}, []
 
 def load_program(path, *, import_base=None):
     """Resolve relative imports once; imported names share one global namespace."""
@@ -720,12 +807,14 @@ def load_program(path, *, import_base=None):
             raise Error('cannot read module: ' + str(error), origin) from None
         parser = Parser(source, str(current))
         own_functions = parser.program()
+        check_edition(parser)
         for token in parser.imports:
             relative = pathlib.Path(token.value[1:-1])
             if relative.is_absolute() or relative.drive or relative.root:
                 raise Error('imports must be relative to their source file', token)
             base = pathlib.Path(import_base) if current == root_path and import_base is not None else current.parent
             visit(base / relative, token)
+            loaded.import_edges.append((str(current), str((base / relative).resolve())))
         for token, relative in parser.natives:
             native = (current.parent / relative).resolve()
             if not native.is_file(): raise Error('native file not found: ' + relative, token)
@@ -741,15 +830,15 @@ def load_program(path, *, import_base=None):
     visit(path)
     return loaded
 
-def compile_file(path, *, foreign_commands=None, import_base=None):
+def compile_file(path, *, foreign_commands=None, import_base=None, require_main=True):
     loaded = load_program(path, import_base=import_base)
     return Compiler(functions=loaded.functions, foreign_commands=foreign_commands, externs=loaded.externs,
-                    links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees).compile()
+                    links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=require_main).compile()
 
 def api_report(path):
     """Machine-readable summary of a program's callable surface, for tools and agents."""
     loaded = load_program(path)
-    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees).compile()
+    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees, require_main=False).compile()
     def params(items): return [{'name': p.value, 'type': t} for p, t in items]
     functions = [{'name': n.value, 'kind': 'fn', 'params': params(p), 'result': r, 'effects': sorted(e),
                   'file': n.source, 'line': n.line} for n, p, r, e, _ in loaded.functions]
@@ -806,13 +895,18 @@ def build(rust_source, output, profile='release', link_search=(), link_args=()):
         if process.returncode: raise RuntimeError('native backend failed:\n' + process.stderr)
     return output
 
+COMMAND_CHOICES = ['check', 'emit', 'build', 'run', 'test', 'api', 'adopt', 'characterize', 'lens', 'audit', 'slice', 'map', 'manifest', 'explain']
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=VERSION)
-    parser.add_argument('command', choices=['check', 'emit', 'build', 'run', 'api', 'adopt', 'lens', 'audit', 'slice'])
-    parser.add_argument('source', type=pathlib.Path, help='an .axl file (a directory for `adopt`)')
+    parser.add_argument('command', choices=COMMAND_CHOICES)
+    parser.add_argument('source', type=pathlib.Path, nargs='?', help='an .axl file (a directory for `adopt`, a code for `explain`)')
     parser.add_argument('-o', '--output', type=pathlib.Path)
     parser.add_argument('--json', action='store_true', help='machine-readable compiler diagnostics')
+    parser.add_argument('--strict', action='store_true', help='also fail on patterns that usually hide failures (see `axle explain E080`)')
+    parser.add_argument('--filter', help='test: only run tests whose name contains this text')
+    parser.add_argument('--check', action='store_true', help='adopt: fail if the existing bindings are out of date')
     parser.add_argument('--line', type=int, help='lens: source line to explain')
     parser.add_argument('--fn', help='slice: function to extract context for')
     parser.add_argument('--file', type=pathlib.Path, help='lens: module the line belongs to (default: the entry file)')
@@ -827,6 +921,16 @@ def main(argv=None):
             raise RuntimeError('output must not overwrite source')
         if options.command == 'adopt':
             import adopt
+            if options.check:
+                ok, added, removed, problem = adopt.check(options.source, options.output)
+                if problem: raise Error(problem)
+                if ok: print('bindings are up to date')
+                else:
+                    print('bindings are stale:')
+                    for line in added: print('  + ' + line + '   (new in the source)')
+                    for line in removed: print('  - ' + line + '   (gone or changed in the source)')
+                    print('run `axle adopt` to refresh')
+                return 0 if ok else 1
             report = adopt.run(options.source, options.output)
             if options.json: print(json.dumps(report))
             else:
@@ -835,14 +939,34 @@ def main(argv=None):
                 print('bindings: ' + report['bindings_file'])
                 print('map:      ' + str(pathlib.Path(report['bindings_file']).with_name('axle.map.json')))
             return 0
+        if options.command == 'characterize':
+            import characterize
+            summary = characterize.run(options.source, options.output, options.link_search, options.link_arg)
+            if options.json: print(json.dumps(summary))
+            else:
+                print(f'recorded {summary["recorded_assertions"]} assertions for {summary["functions"]} functions -> {summary["tests_file"]}')
+                for a in summary['aborts']: print(f'  aborts: {a["function"]}({", ".join(a["inputs"])}): {a["detail"]}')
+                print('run `axle test ' + summary['tests_file'] + '` to replay them')
+            return 0
         try:
-            if options.command in {'lens', 'audit', 'slice'}:
+            if options.command in {'manifest', 'explain'}:
+                import manifest
+                return manifest.run(options.command, options)
+            if options.source is None:
+                raise Error(f'{options.command} requires a source argument', hint='see `axle manifest` for command usage')
+            if options.command == 'test':
+                import testing
+                return testing.run(options)
+            if options.command in {'lens', 'audit', 'slice', 'map'}:
                 import lens
                 return lens.run(options.command, options)
             if options.command == 'api':
                 print(json.dumps(api_report(options.source), indent=2))
                 return 0
-            rust = compile_file(options.source)
+            rust = compile_file(options.source, require_main=options.command in {'build', 'run', 'emit'})
+            if options.strict and options.command in {'check', 'build', 'run', 'emit'}:
+                import lens
+                lens.enforce_strict(options.source)
         except RecursionError:
             raise Error('source nesting exceeds compiler limit') from None
         if options.command == 'emit':
@@ -873,4 +997,6 @@ def main(argv=None):
         return 1
 
 if __name__ == '__main__':
-    sys.exit(main())
+    # Run the importable module, so helper modules (lens, manifest, ...) share one Error class with the CLI.
+    import axle as _axle
+    sys.exit(_axle.main())

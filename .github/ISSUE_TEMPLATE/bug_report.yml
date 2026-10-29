@@ -1,0 +1,30 @@
+name: Bug report
+description: Report a reproducible compiler, runtime, or adapter problem.
+labels: [bug]
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal source and command
+      description: Include the smallest source and exact command that reproduce the problem. Remove credentials and private data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and output
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, AXLE commit/version, Python and Rust versions, and relevant guest runtime/compiler versions.
+    validations:
+      required: true

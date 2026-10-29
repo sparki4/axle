@@ -1,8 +1,19 @@
 # AXLE 0.2
 
+[![Tests](https://github.com/sparki4/axle/actions/workflows/tests.yml/badge.svg)](https://github.com/sparki4/axle/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A native language for coding agents, plus an extensible polyglot source builder. AXLE provides exact scalar types, checked effects, explicit raw memory, and higher level checked buffers. The polyglot builder lets different host languages contain blocks written in other languages.
 
 This is an experimental working implementation, not a replacement for Rust on every project. The core compiles through Rust. The polyglot bridge uses separate processes and installed runtimes; it is not a unified shared-memory runtime.
+
+**Help shape AXLE.** Contributors are welcome to work on language adapters, compiler diagnostics, portability, examples, and reproducible performance improvements. Small fixes and documentation improvements are welcome too. Start with the [contribution guide](CONTRIBUTING.md), [roadmap](ROADMAP.md), or [good first issues](https://github.com/sparki4/axle/labels/good%20first%20issue). Open an issue to discuss a larger change, or send a focused pull request.
+
+```sh
+git clone https://github.com/sparki4/axle.git
+cd axle
+python axle.py run examples/hello.axl
+```
 
 ## Run it
 

@@ -1,0 +1,30 @@
+name: Feature or adapter proposal
+description: Propose a language feature, adapter, or developer-tool improvement.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this let you do?
+      description: Describe a concrete use case and what is difficult today.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Proposed behavior or source example
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Alternatives and tradeoffs
+      description: Consider compatibility, ownership, runtime requirements, and performance costs where relevant.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Would you like to help implement it?
+      options:
+        - I would like to try
+        - I can help test or document it
+        - I am sharing a use case

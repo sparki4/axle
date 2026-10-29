@@ -10,6 +10,7 @@ This is a direction for contributors, not a release schedule or a promise that e
 - Optimized native builds through Rust, with release/native/size profiles.
 - AXLE, Python, JavaScript, Rust, C, and C++ as mixed-language hosts and guests, including nested blocks.
 - Typed `extern` calls into C (direct), Python and JavaScript (persistent workers), `native`/`link` inputs, and `axle adopt` binding generation with a skipped-function report.
+- Per-operation footprint facts, verified `nothrow`/`noalloc` guarantees, and `lens`/`audit`/`slice` for per-line, per-function and minimal-context answers.
 - Structured diagnostics with stable codes, hints and name suggestions; `axle api` for tooling.
 - An adapter API, runnable examples, regression tests, and matched-profile benchmarks.
 
@@ -34,6 +35,13 @@ Look at the issue tracker before starting so work is not duplicated. Propose a b
 3. Add source mapping for generated code and better diagnostics for guest-build failures.
 4. Make polyglot outputs relocatable with an explicit bundle layout and runtime discovery.
 5. Expand regression and differential testing around effect propagation, module paths, integer edge cases, and adapter failures.
+
+## Analysis
+
+- A `pure`/`reads-only` guarantee, and a termination guarantee for loops with a provable bound.
+- Footprint facts for the polyglot builder's guest blocks and for the contents of foreign modules (read from the source scanned by `adopt`).
+- An editor integration that shows `lens` output inline.
+- A measured study of whether the analysis helps coding agents: tasks done with and without `slice`/`lens`.
 
 ## Language growth
 

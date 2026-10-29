@@ -32,6 +32,9 @@ python -m unittest discover -s tests -p test_axle.py -v
 # Externs, bridges, adopt, diagnostics, loop control
 python -m unittest discover -s tests -p test_v03.py -v
 
+# Footprint analysis, guarantees, lens/audit/slice, randomized soundness check
+python -m unittest discover -s tests -p test_footprint.py -v
+
 # Buffers, imports, inference, and build profiles
 python -m unittest discover -s tests -p test_v02.py -v
 
@@ -51,6 +54,8 @@ Documentation-only changes do not need a new test. For behavior changes, add a r
 | Lexer, parser, types, effects, Rust lowering, CLI | `axle.py` |
 | Mixed-language scanner, host/guest adapters, project builds | `polyglot.py` |
 | `adopt` scanners (Python, JavaScript, C, Rust) | `adopt.py` |
+| Footprint facts, guarantees (`nothrow`/`noalloc`) | `Compiler.note`, `Compiler.violation` in `axle.py` |
+| `lens`, `audit`, `slice` | `lens.py` |
 | Python/JavaScript bridge workers and Rust runtime | `bridge_runtime.py` |
 | Plugin example | `adapters/ruby_host.py` |
 | Core language contracts | `SPEC.md` |

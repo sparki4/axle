@@ -1,0 +1,25 @@
+// Guarantees are written in the signature and proven over the whole call graph.
+// Try:  python axle.py audit examples/guarantees.axl
+//       python axle.py lens  examples/guarantees.axl --line 17
+//       python axle.py slice examples/guarantees.axl --fn checksum
+
+// Cannot abort and cannot allocate: the compiler proves it, or refuses to build.
+fn mix(state: u64, value: u64) -> u64 nothrow noalloc {
+    return (state ^ value) * 6364136223846793005u64 + 1442695040888963407u64;
+}
+
+// Reads a shared buffer, so it can abort on a bad index; it never allocates.
+fn checksum(data: buf_u64, count: u64) -> u64 ![mem] noalloc {
+    var i = 0u64;
+    var state = 1u64;
+    while i < count {
+        state = mix(state, buf_get(data, i));
+        i = i + 1u64;
+    }
+    return state;
+}
+
+fn main() -> unit ![io, mem] {
+    let data = buf_iota(1000u64);
+    print(checksum(data, 1000u64));
+}

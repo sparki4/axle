@@ -1,9 +1,9 @@
-# AXLE 0.3
+# AXLE 0.4
 
 [![Tests](https://github.com/sparki4/axle/actions/workflows/tests.yml/badge.svg)](https://github.com/sparki4/axle/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A native language for coding agents that adopts existing code instead of replacing it. AXLE can call functions in your current Python, JavaScript, C and Rust-ABI code through typed declarations, scan a codebase to generate those declarations, and report errors as structured diagnostics with codes and fix hints. It also includes an extensible polyglot source builder. AXLE provides exact scalar types, checked effects, explicit raw memory, and higher level checked buffers. The polyglot builder lets different host languages contain blocks written in other languages.
+A native language for coding agents that adopts existing code instead of replacing it. AXLE can call functions in your current Python, JavaScript, C and Rust-ABI code through typed declarations, scan a codebase to generate those declarations, report errors as structured diagnostics with codes and fix hints, and answer "what can this line actually do?" for any line of code. It also includes an extensible polyglot source builder. AXLE provides exact scalar types, checked effects, explicit raw memory, and higher level checked buffers. The polyglot builder lets different host languages contain blocks written in other languages.
 
 This is an experimental working implementation, not a replacement for Rust on every project. The core compiles through Rust. The polyglot bridge uses separate processes and installed runtimes; it is not a unified shared-memory runtime.
 
@@ -95,6 +95,43 @@ C calls are direct native calls, at full speed. `c_int`, `c_uint`, `c_long`, `c_
 
 `python axle.py api program.axl` prints a JSON description of every function, signature, effect and extern. See [AGENTS.md](AGENTS.md) for a short guide aimed at coding agents.
 
+## Know what your code can do
+
+In most languages a line like `foo()` tells you nothing about what happens underneath. AXLE records, for every operation, whether it can allocate, abort, do I/O, mutate shared storage, create a second handle to shared storage, use raw memory, loop without a proof of termination, or cross into foreign code. Three commands expose this, always including everything the callees can do:
+
+```text
+$ python axle.py lens examples/demo.axl --line 27
+examples/demo.axl:27  in fn main() -> unit ![io, mem]
+  report(1u64, average(data, 10u64));
+  - calls `average`: can abort (division by zero; index out of bounds), may not terminate (loop or recursion)
+  - calls `report`: can abort (standard output can fail (for example a closed pipe)), does I/O
+```
+
+A line with nothing to report says so explicitly ("only local arithmetic, comparisons and bindings; cannot allocate, abort, do I/O, call anything, touch shared storage or loop"), so a missing warning is an answer, not an omission.
+
+```sh
+python axle.py lens  prog.axl --line 27     # what can this line do?
+python axle.py audit prog.axl               # every function: footprint, unused effects, guarantees it could carry
+python axle.py slice prog.axl --fn average  # the minimum context to change one function
+python axle.py slice prog.axl --fn main --depth 1   # ...plus the bodies of what it calls
+```
+
+All three take `--json`. `slice` prints the function's source (with its leading comment), the signature and total footprint of everything it calls, and who calls it, which is the context needed to change it safely without reading the rest of the program. `audit` also flags effects a function declares but never uses, functions that would be accepted with a guarantee, and places where one buffer gets a second handle.
+
+**Guarantees are checked, not documented.** Write them in the signature:
+
+```text
+fn mix(state: u64, value: u64) -> u64 nothrow noalloc { ... }
+```
+
+`nothrow` means the function and everything it can reach cannot abort: no division by a value that might be zero, no buffer indexing, no `assert`, no printing, no unsafe memory access, no bridge calls. `noalloc` means nothing reachable allocates. If either is false, the build fails and names the chain:
+
+```text
+fn guarded is declared nothrow but can abort: division by zero (line 3, in fn divide; call chain: guarded -> mid -> divide)
+```
+
+`nothrow` does not cover running out of memory or stack, and it says nothing about termination (`audit` reports loops and recursion separately). A foreign C function can be trusted with `extern "c" fn f(...) -> T nothrow noalloc;`; AXLE records that as a claim it cannot verify. Python and JavaScript bridge functions can never carry either guarantee. The checker is tested against randomly generated programs: anything it accepts as `nothrow` must run without aborting.
+
 ## Mix host and guest languages
 
 A Python host can contain JavaScript, Rust, or C:
@@ -145,6 +182,7 @@ python benchmark_suite.py --samples 9 --output benchmark-v02.json
 ```powershell
 python axle.py check examples/adaptive.axl --json
 python axle.py api examples/adaptive.axl
+python axle.py audit examples/guarantees.axl
 python axle.py adopt path/to/project
 python axle.py emit examples/adaptive.axl -o adaptive.rs
 python axle.py build examples/adaptive.axl --profile size -o adaptive.exe

@@ -1,4 +1,4 @@
-# AXLE 0.3 language reference
+# AXLE 0.4 language reference
 
 This describes the implemented core. Source is UTF-8; identifiers use ASCII letters, digits, and `_`, and cannot start with a digit. Whitespace separates tokens. `//` comments extend to the end of the line. Keywords and type names cannot be identifiers. Builtin names cannot be declared as functions. Identifiers are case-sensitive. Quoted paths are supported only in imports; there are no runtime strings, character literals, preprocessor directives, or implicit semicolons. Mixed-language source is handled by the separate polyglot builder described in POLYGLOT.md.
 
@@ -8,9 +8,10 @@ This describes the implemented core. Source is UTF-8; identifiers use ASCII lett
 program    = { function | extern | "import", quoted_relative_axl_path, ";"
              | "link", quoted_library_name, ";" | "native", quoted_relative_path, ";" } ;
 extern     = "extern", quoted_kind, "fn", identifier, "(", [params], ")", "->", type,
-             ["!", "[", [effect, {",", effect}], "]"], ["=", quoted_foreign_name], ";" ;
+             ["!", "[", [effect, {",", effect}], "]"], {guarantee}, ["=", quoted_foreign_name], ";" ;
 function   = "fn", identifier, "(", [params], ")", "->", type,
-             ["!", "[", [effect, {",", effect}], "]"], block ;
+             ["!", "[", [effect, {",", effect}], "]"], {guarantee}, block ;
+guarantee  = "nothrow" | "noalloc" ;
 params     = identifier, ":", type, {",", identifier, ":", type} ;
 effect     = "io" | "mem" ;
 type       = "i64" | "u64" | "bool" | "unit" | "buf_u64" | "*i64" | "*u64" | "*bool" ;
@@ -119,6 +120,14 @@ Unsafe code is responsible for memory validity, pointer provenance, alignment, v
 **Kinds `"py:<target>[@root]"` and `"js:<target>[@root]"`** call a function in a persistent worker process. A target ending in `.py` (or `.js`, `.mjs`, `.cjs`) is a file path relative to the declaring source file; any other target is a module name resolved from `root` (default: the declaring file's directory). Only `i64`, `u64`, `bool` parameters and `i64`, `u64`, `bool`, `unit` results are allowed. Bridge calls implicitly carry `io` and need no `unsafe`. Arguments are sent as decimal text. A result that is not exactly the declared type (a float, a negative value for `u64`, a value outside 64 bits) aborts with the foreign message. Foreign exceptions abort with their original text. The worker loads the module once; state persists between calls and ends with the program. File targets are resolved to absolute paths when compiled, so a built executable is not relocatable. Set `AXLE_PYTHON` or `AXLE_NODE` to choose an interpreter. The JavaScript worker supports CommonJS and `.mjs`.
 
 `native "path";` compiles a `.c`, `.cc`, `.cpp` or `.cxx` file with the system compiler (gcc, clang or cc; `cl` is attempted on Windows but unverified) and links it. A `.o` or `.a` is linked as is. C++ must export `extern "C"` symbols. The path is relative to the declaring file. `link "name";` adds `-l name`; use `--link-search DIR` for directories and `--link-arg ARG` for other linker flags. Both apply to `build` and `run`.
+
+## Guarantees and footprint
+
+The compiler records a *fact* for each operation. Kinds: `abort` (can terminate the program, with a reason), `alloc`, `io`, `read`, `write` (shared buffer or raw memory), `assign` (local variable; never visible to callers), `alias` (a second handle to a shared buffer), `unsafe`, `loop`, `call`, `foreign`. A function's *footprint* is the union of its facts and those of everything reachable through its calls. Division and remainder record an `abort` unless the divisor is a non-zero literal. `print` records an `abort` because standard output can fail. Calling a Python or JavaScript bridge function records an `abort` because the foreign function can raise.
+
+`nothrow` and `noalloc` after a function's effect list are verified over the call graph at compile time. `nothrow` fails on any reachable `abort` fact, any reachable unsafe memory operation, any bridge call, and any foreign C function not declared `nothrow`. `noalloc` fails on any reachable `alloc` fact, any bridge call, and any foreign C function not declared `noalloc`. Extern declarations may carry the same words as unverified claims; bridge externs may not. Neither guarantee covers memory or stack exhaustion, and neither implies termination. Errors use code `E060` and name the call chain.
+
+`axle lens FILE --line N [--file MODULE]`, `axle audit FILE` and `axle slice FILE --fn NAME [--depth D]` report the facts (`--json` for structured output). Line numbers refer to the entry file unless `--file` names an imported module.
 
 ## Diagnostics
 

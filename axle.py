@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import bridge_runtime
 
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 TYPES = {'i64', 'u64', 'bool', 'unit', 'buf_u64'}
 
 # Stable diagnostic codes and generic repair hints, matched against the message.
@@ -34,6 +34,7 @@ DIAGNOSTICS = [
     (r'(break|continue) outside', 'E035', 'use break/continue only inside a while loop'),
     (r'^expected (i64|u64|bool|unit|buf_u64|\*)', 'E040', 'AXLE has no implicit conversions; make both sides the same type (literals take u64/i64 suffixes)'),
     (r'^arguments must have types', 'E041', 'pass arguments with exactly the declared types'),
+    (r'declared (nothrow|noalloc)', 'E060', 'remove the guarantee, or fix the call chain named in the message'),
     (r'extern|bridge|native|link', 'E050', None),
 ]
 
@@ -86,7 +87,8 @@ ABI_TYPES = {'c_int': 'std::ffi::c_int', 'c_uint': 'std::ffi::c_uint', 'c_long':
              'c_ulong': 'std::ffi::c_ulong', 'c_size': 'usize'}
 ABI_VISIBLE = {'c_int': 'i64', 'c_long': 'i64', 'c_uint': 'u64', 'c_ulong': 'u64', 'c_size': 'u64'}
 RESERVED = TYPES | set(ABI_TYPES) | {'import', 'fn', 'let', 'var', 'return', 'if', 'else', 'while', 'unsafe', 'true', 'false',
-                                     'io', 'mem', 'extern', 'link', 'native', 'break', 'continue'}
+                                     'io', 'mem', 'extern', 'link', 'native', 'break', 'continue',
+                                     'nothrow', 'noalloc'}
 BUILTINS = {'print', 'assert', 'addr', 'load', 'store', 'arg_u64', 'alloc_u64', 'free_u64', 'offset',
             'buf_new', 'buf_iota', 'buf_len', 'buf_get', 'buf_set', 'buf_sum', 'black_box', 'poly_exec'}
 
@@ -94,6 +96,7 @@ class Parser:
     def __init__(self, source, source_name=None):
         self.tokens, self.i = lex(source, source_name), 0
         self.imports, self.externs, self.links, self.natives = [], [], [], []
+        self.spans, self.guarantees = {}, {}
     def peek(self):
         return self.tokens[self.i].value
     def pop(self):
@@ -148,6 +151,11 @@ class Parser:
                     effects.add(effect.value)
                     if not self.take(','): break
             self.need(']')
+        self.last_guarantees = set()
+        while self.peek() in {'nothrow', 'noalloc'}:
+            guarantee = self.pop()
+            if guarantee.value in self.last_guarantees: raise Error('duplicate guarantee ' + guarantee.value, guarantee)
+            self.last_guarantees.add(guarantee.value)
         return name, params, result, effects
     def quoted(self, what):
         token = self.pop()
@@ -181,9 +189,13 @@ class Parser:
             if self.take('extern'):
                 self.externs.append(self.extern())
                 continue
+            start = self.tokens[self.i]
             self.need('fn')
             name, params, result, effects = self.header()
-            functions.append((name, params, result, effects, self.block()))
+            if self.last_guarantees: self.guarantees[name.value] = self.last_guarantees
+            body = self.block()
+            self.spans[name.value] = (name.source, start.line, self.tokens[self.i - 1].line)
+            functions.append((name, params, result, effects, body))
         return functions
     def extern(self):
         kind_token, kind = self.quoted('foreign kind')
@@ -197,6 +209,8 @@ class Parser:
             if not re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', symbol):
                 raise Error('foreign name must be an identifier', name)
         self.need(';')
+        if self.last_guarantees: self.guarantees[name.value] = self.last_guarantees
+        self.spans[name.value] = (name.source, kind_token.line, self.tokens[self.i - 1].line)
         return (kind_token, kind, name, params, result, effects, symbol)
     def block(self):
         self.need('{')
@@ -284,14 +298,17 @@ def rust_literal(text):
     return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 class Compiler:
-    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=()):
+    def __init__(self, source=None, functions=None, foreign_commands=None, externs=None, links=(), natives=(), guarantees=None):
         self.foreign_commands = foreign_commands or {}
+        self.guarantees = dict(guarantees or {})
+        self.facts, self.current = {}, None
         self.links, self.natives = list(links), list(natives)
         externs = list(externs or [])
         if functions is None:
             parser = Parser(source)
             self.functions = parser.program()
             externs += parser.externs
+            self.guarantees.update(parser.guarantees)
             self.links += parser.links
             if parser.natives: raise Error('native requires compile_file or the CLI', parser.natives[0][0])
             if parser.imports: raise Error('imports require compile_file or the CLI', parser.imports[0])
@@ -317,11 +334,21 @@ class Compiler:
                 if param.value in seen: raise Error('duplicate or unit parameter', param)
                 seen.add(param.value)
             visible = lambda t: ABI_VISIBLE.get(t, t)
+            if lang != 'c' and self.guarantees.get(name.value):
+                raise Error('extern bridge functions cannot claim nothrow or noalloc: foreign calls can fail and allocate', name)
             declared = set(effects) | ({'io'} if lang != 'c' else set())
             self.signatures[name.value] = ([visible(t) for _, t in params], visible(result), declared)
             self.externs[name.value] = (kind_token, kind, params, result, symbol)
         if 'main' not in self.signatures or self.signatures['main'][:2] != ([], 'unit'):
             raise Error('program requires fn main() -> unit')
+    def note(self, kind, token, **detail):
+        """Record one footprint fact: something this source position can do."""
+        if self.current is not None:
+            self.facts.setdefault(self.current, []).append(
+                dict(kind=kind, function=self.current, line=token.line, column=token.column, source=token.source, **detail))
+    def alias_note(self, node, typ, token):
+        if node[0] == 'name' and typ == 'buf_u64':
+            self.note('alias', token, name=node[1].value, what=f'second handle to the same shared buffer as `{node[1].value}`; writes through either are visible to both')
     def require(self, actual, expected, token):
         if actual != expected:
             raise Error(f'expected {expected}, got {actual}', token)
@@ -380,6 +407,10 @@ class Compiler:
                 rhs = f'(({rc}) & 63{rt}) as u32' if value in {'<<', '>>'} else rc
                 code = f'({lc}).{methods[value]}({rhs})'
             else: code = f'(({lc}) {value} ({rc}))'
+            if value in {'/', '%'}:
+                divisor = rest[1]
+                if not (divisor[0] == 'number' and int(re.match(r'[0-9]+', divisor[1].value)[0]) != 0):
+                    self.note('abort', token, why='division by zero', via=value)
             return ('bool' if value in {'&&', '||', '==', '!=', '<', '>', '<=', '>='} else lt), code
         if kind == 'call':
             args = rest[0]
@@ -390,6 +421,7 @@ class Compiler:
                 typ, mutable = self.lookup(args[0][1])
                 if not mutable or typ not in {'i64', 'u64', 'bool'}:
                     raise Error('addr requires a mutable scalar variable', token)
+                self.note('unsafe', token, what=f'takes the raw address of `{args[0][1].value}`', effect='mem')
                 return '*' + typ, '(&raw mut v_' + args[0][1].value + ')'
             checked = [self.expression(arg) for arg in args]
             types, codes = [x[0] for x in checked], [x[1] for x in checked]
@@ -400,6 +432,8 @@ class Compiler:
                 index = int(args[0][1].value.removesuffix('u64'))
                 if index not in self.foreign_commands:
                     raise Error('poly_exec requires a polyglot build with a known block ID', token)
+                self.note('foreign', token, abi='polyglot', symbol=f'block {index}', effect='io')
+                self.note('abort', token, why='a failing guest block aborts the program', via='poly_exec')
                 return 'unit', self.foreign_commands[index]
             if value == 'black_box':
                 if len(types) != 1 or types[0] == 'unit': raise Error('black_box requires one value', token)
@@ -415,12 +449,21 @@ class Compiler:
                 }
                 expected, result = signature[value]
                 if types != expected: raise Error(f'{value} requires {expected}, got {types}', token)
+                target = args[0][1].value if args and args[0][0] == 'name' else 'a buffer'
+                if value in {'buf_new', 'buf_iota'}: self.note('alloc', token, what='buffer', via=value, effect='mem')
+                elif value in {'buf_get', 'buf_set'}: self.note('abort', token, why='index out of bounds', via=value, effect='mem')
+                if value == 'buf_set': self.note('write', token, target=target, what=f'mutates shared buffer `{target}`', effect='mem')
+                elif value in {'buf_get', 'buf_len', 'buf_sum'}: self.note('read', token, target=target, effect='mem')
                 return result, 'axle_' + value + '(' + ', '.join(codes) + ')'
             if value in {'alloc_u64', 'free_u64', 'offset'}:
                 if not self.unsafe: raise Error(value + ' requires unsafe block', token)
                 self.effect('mem', token)
+                self.note('unsafe', token, what={'alloc_u64': 'raw allocation: you must free it exactly once', 'free_u64': 'raw release: pointer and count must match the allocation',
+                                                 'offset': 'pointer arithmetic is not bounds-checked'}[value], effect='mem')
                 if value == 'alloc_u64':
                     if types != ['u64']: raise Error('alloc_u64 requires a u64 count', token)
+                    self.note('alloc', token, what='raw memory', via=value, effect='mem')
+                    self.note('abort', token, why='allocation count is zero or too large', via=value, effect='mem')
                     return '*u64', 'axle_alloc(' + codes[0] + ')'
                 if value == 'free_u64':
                     if types != ['*u64', 'u64']: raise Error('free_u64 requires *u64 and original u64 count', token)
@@ -434,19 +477,26 @@ class Compiler:
                 count = 1 if value == 'load' else 2
                 if len(types) != count or not types[0].startswith('*'):
                     raise Error(value + ' requires a typed pointer' + (' and value' if count == 2 else ''), token)
+                self.note('unsafe', token, what='raw ' + value + ': undefined behavior if the pointer is invalid', effect='mem')
+                self.note('read' if value == 'load' else 'write', token, target='raw memory', what=('reads' if value == 'load' else 'writes') + ' raw memory', effect='mem')
                 if value == 'load': return types[0][1:], f'unsafe {{ *({codes[0]}) }}'
                 self.require(types[1], types[0][1:], token)
                 return 'unit', f'{{ let axle_pointer = {codes[0]}; let axle_value = {codes[1]}; unsafe {{ *axle_pointer = axle_value; }} }}'
             if value == 'print':
                 self.effect('io', token)
                 if len(types) != 1 or types[0] not in {'i64', 'u64', 'bool'}: raise Error('print requires one scalar', token)
+                self.note('io', token, what='prints to standard output', effect='io')
+                self.note('abort', token, why='standard output can fail (for example a closed pipe)', via='print', effect='io')
                 return 'unit', 'println!("{}", ' + codes[0] + ')'
             if value == 'assert':
                 if types != ['bool']: raise Error('assert requires one bool', token)
+                self.note('abort', token, why='assertion can fail', via='assert')
                 return 'unit', 'assert!(' + codes[0] + ')'
             if value == 'arg_u64':
                 self.effect('io', token)
                 if types != ['u64']: raise Error('arg_u64 requires one u64 index', token)
+                self.note('io', token, what='reads a command-line argument', effect='io')
+                self.note('abort', token, why='missing or non-numeric command-line argument', via='arg_u64', effect='io')
                 return 'u64', 'axle_arg(' + codes[0] + ')'
             if value not in self.signatures:
                 close = did_you_mean(value, set(self.signatures) | BUILTINS)
@@ -455,9 +505,13 @@ class Compiler:
             expected, result, effects = self.signatures[value]
             if types != expected: raise Error(f'arguments must have types {expected}, got {types}', token)
             for effect in sorted(effects): self.effect(effect, token)
+            self.note('call', token, callee=value, declared=sorted(effects))
             if value in self.externs:
                 if self.externs[value][1] == 'c' and not self.unsafe:
                     raise Error(f'calling extern "c" function {value} requires unsafe block', token)
+                self.note('foreign', token, callee=value, abi=self.externs[value][1], symbol=self.externs[value][4])
+                if self.externs[value][1] != 'c':
+                    self.note('abort', token, why=f'the {self.externs[value][1].split(":")[0]} function `{self.externs[value][4]}` can raise, which aborts the program', via=value, effect='io')
                 return result, 'x_' + value + '(' + ', '.join(codes) + ')'
             return result, 'f_' + value + '(' + ', '.join(codes) + ')'
         raise Error('invalid expression', token)
@@ -472,6 +526,7 @@ class Compiler:
                 if typ == 'unit': raise Error('unit variables are not supported', name)
                 if name.value in self.scopes[-1]: raise Error('duplicate variable in this scope', name)
                 actual, code = self.expression(expr)
+                self.alias_note(expr, actual, name)
                 if typ is None: typ = actual
                 if typ == 'unit': raise Error('unit variables are not supported', name)
                 self.require(actual, typ, name)
@@ -484,10 +539,13 @@ class Compiler:
                 if not mutable: raise Error('cannot assign to immutable variable', token)
                 actual, code = self.expression(rhs)
                 self.require(actual, typ, token)
+                self.note('assign', token, target=target[1].value, what=f'assigns local variable `{target[1].value}` (not visible outside this function)')
+                self.alias_note(rhs, actual, token)
                 lines.append('v_' + target[1].value + ' = ' + code + ';')
             elif kind == 'return':
                 typ, code = ('unit', '()') if rest[0] is None else self.expression(rest[0])
                 self.require(typ, self.result, token)
+                if rest[0] is not None: self.alias_note(rest[0], typ, token)
                 lines.append('return ' + code + ';')
                 returned = ended = True
             elif kind in {'break', 'continue'}:
@@ -497,7 +555,9 @@ class Compiler:
             elif kind in {'if', 'while'}:
                 typ, code = self.expression(rest[0])
                 self.require(typ, 'bool', token)
-                if kind == 'while': self.loops += 1
+                if kind == 'while':
+                    self.note('loop', token, what='while loop: termination is not proven')
+                    self.loops += 1
                 body, yes_return, yes_end = self.block(rest[1])
                 if kind == 'while': self.loops -= 1
                 line = f'{kind} {code} {{\n{body}\n}}'
@@ -508,6 +568,7 @@ class Compiler:
                 lines.append(line)
             elif kind == 'unsafe':
                 previous = self.unsafe
+                self.note('unsafe', token, what='unsafe block: the compiler does not check memory validity inside', block=True)
                 self.unsafe = True
                 body, returned, ended = self.block(rest[0])
                 self.unsafe = previous
@@ -555,6 +616,52 @@ class Compiler:
         else:
             tail = f'let reply = {call};\nreply.parse::<{result}>().unwrap_or_else(|_| axle_bridge_fail({rust_literal(symbol)}, "expected a {result} result, got", &reply))'
         return head + ' {\n' + tail + '\n}'
+    def call_graph(self):
+        graph = {name: [] for name in self.signatures}
+        for name, facts in self.facts.items():
+            for fact in facts:
+                if fact['kind'] == 'call' and fact['callee'] not in graph[name]: graph[name].append(fact['callee'])
+        return graph
+    def violation(self, root, guarantee, graph=None):
+        """First reason `root` cannot carry `guarantee`, with the call chain to it; None if it provably can."""
+        graph = graph or self.call_graph()
+        parent, queue = {root: None}, [root]
+        def chain(node):
+            path = []
+            while node is not None: path.append(node); node = parent[node]
+            return ' -> '.join(reversed(path))
+        while queue:
+            current = queue.pop(0)
+            if current in self.externs:
+                kind = self.externs[current][1]
+                if kind != 'c':
+                    return f'calls the {kind.split(":")[0]} bridge function {current}, which can fail and allocate (call chain: {chain(current)})'
+                if guarantee not in self.guarantees.get(current, ()):
+                    return (f'calls foreign function {current}, which AXLE cannot verify; add `{guarantee}` to its extern '
+                            f'declaration if you trust it (call chain: {chain(current)})')
+                continue
+            for fact in self.facts.get(current, []):
+                bad = None
+                if guarantee == 'nothrow' and fact['kind'] == 'abort': bad = f'can abort: {fact["why"]}'
+                elif guarantee == 'nothrow' and fact['kind'] == 'unsafe' and not fact.get('block'): bad = 'uses unsafe memory access, which can crash'
+                elif guarantee == 'noalloc' and fact['kind'] == 'alloc': bad = f'allocates {fact["what"]}'
+                if bad:
+                    return f'{bad} (line {fact["line"]}, in fn {current}; call chain: {chain(current)})'
+            for nxt in graph.get(current, []):
+                if nxt not in parent:
+                    parent[nxt] = current
+                    queue.append(nxt)
+        return None
+    def verify_guarantees(self):
+        graph = self.call_graph()
+        names = {name.value: name for name, *_ in self.functions}
+        for name, wanted in sorted(self.guarantees.items()):
+            if name not in names: continue   # extern claims are trusted, not verified
+            for guarantee in sorted(wanted):
+                problem = self.violation(name, guarantee, graph)
+                if problem:
+                    raise Error(f'fn {name} is declared {guarantee} but {problem}', names[name],
+                                hint=f'remove `{guarantee}` from fn {name}, or remove the operation named above')
     def compile(self):
         chunks = ['// Generated by AXLE ' + VERSION,
                   '#![allow(unused_parens, unused_mut, dead_code, unused_variables, clashing_extern_declarations)]',
@@ -583,6 +690,7 @@ class Compiler:
             arguments = ', '.join('v_' + p.value + ': ' + rust_type(t) for p, t in params)
             chunks.append(f'fn f_{name.value}({arguments}) -> {rust_type(result)} {{\n{body}\n}}')
         chunks.append('fn main() { f_main(); }')
+        self.verify_guarantees()
         result = RustSource('\n\n'.join(chunks) + '\n')
         result.links, result.natives = tuple(dict.fromkeys(self.links)), tuple(dict.fromkeys(self.natives))
         return result
@@ -594,6 +702,7 @@ class Loaded:
     """A fully resolved AXLE program: all modules, externs and link inputs."""
     def __init__(self):
         self.functions, self.externs, self.links, self.natives, self.modules = [], [], [], [], []
+        self.guarantees, self.spans = {}, {}
 
 def load_program(path, *, import_base=None):
     """Resolve relative imports once; imported names share one global namespace."""
@@ -623,6 +732,8 @@ def load_program(path, *, import_base=None):
             loaded.natives.append(str(native))
         loaded.functions.extend(own_functions)
         loaded.externs.extend(parser.externs)
+        loaded.guarantees.update(parser.guarantees)
+        loaded.spans.update(parser.spans)
         loaded.links.extend(parser.links)
         loaded.modules.append(str(current))
         active.remove(current)
@@ -633,12 +744,12 @@ def load_program(path, *, import_base=None):
 def compile_file(path, *, foreign_commands=None, import_base=None):
     loaded = load_program(path, import_base=import_base)
     return Compiler(functions=loaded.functions, foreign_commands=foreign_commands, externs=loaded.externs,
-                    links=loaded.links, natives=loaded.natives).compile()
+                    links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees).compile()
 
 def api_report(path):
     """Machine-readable summary of a program's callable surface, for tools and agents."""
     loaded = load_program(path)
-    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives).compile()
+    Compiler(functions=loaded.functions, externs=loaded.externs, links=loaded.links, natives=loaded.natives, guarantees=loaded.guarantees).compile()
     def params(items): return [{'name': p.value, 'type': t} for p, t in items]
     functions = [{'name': n.value, 'kind': 'fn', 'params': params(p), 'result': r, 'effects': sorted(e),
                   'file': n.source, 'line': n.line} for n, p, r, e, _ in loaded.functions]
@@ -698,10 +809,14 @@ def build(rust_source, output, profile='release', link_search=(), link_args=()):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=VERSION)
-    parser.add_argument('command', choices=['check', 'emit', 'build', 'run', 'api', 'adopt'])
+    parser.add_argument('command', choices=['check', 'emit', 'build', 'run', 'api', 'adopt', 'lens', 'audit', 'slice'])
     parser.add_argument('source', type=pathlib.Path, help='an .axl file (a directory for `adopt`)')
     parser.add_argument('-o', '--output', type=pathlib.Path)
     parser.add_argument('--json', action='store_true', help='machine-readable compiler diagnostics')
+    parser.add_argument('--line', type=int, help='lens: source line to explain')
+    parser.add_argument('--fn', help='slice: function to extract context for')
+    parser.add_argument('--file', type=pathlib.Path, help='lens: module the line belongs to (default: the entry file)')
+    parser.add_argument('--depth', type=int, default=0, help='slice: also include callee bodies to this depth')
     parser.add_argument('-L', '--link-search', action='append', default=[], metavar='DIR', help='directory searched for `link` libraries')
     parser.add_argument('--link-arg', action='append', default=[], metavar='ARG', help='extra linker argument')
     parser.add_argument('--profile', choices=['release', 'native', 'size'], default='release')
@@ -721,6 +836,9 @@ def main(argv=None):
                 print('map:      ' + str(pathlib.Path(report['bindings_file']).with_name('axle.map.json')))
             return 0
         try:
+            if options.command in {'lens', 'audit', 'slice'}:
+                import lens
+                return lens.run(options.command, options)
             if options.command == 'api':
                 print(json.dumps(api_report(options.source), indent=2))
                 return 0
